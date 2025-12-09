@@ -2807,183 +2807,191 @@ startPagoOnlineAlerts();
 
 </script>
 <!-- PANEL DE INVENTARIO -->
-<div id="box-inventario" class="inventario-panel">
-  <div id="inv-header">🧃 Inventario</div>
-  <div id="inv-body">
-    <table id="inv-table">
-      <tbody></tbody>
-    </table>
+<div class="inventario-wrapper">
+  <div id="box-inventario" class="inventario-panel collapsed">
+    <div id="inv-header" class="inventario-header">
+      <div class="inv-title">🧃 Inventario</div>
+      <button id="inv-toggle" class="inv-toggle" aria-label="Minimizar o expandir inventario">▾</button>
+    </div>
+    <div id="inv-body" class="inventario-body">
+      <table id="inv-table" class="inventario-table">
+        <tbody></tbody>
+      </table>
+    </div>
   </div>
-</div>
 
 <!-- BOTÓN FLOTANTE MOBILE -->
-<button id="btn-inventario" class="inventario-btn" title="Inventario">🧃</button>
+  <button id="btn-inventario" class="inventario-btn" title="Inventario" aria-label="Abrir inventario">
+    <span class="icon">🧃</span>
+    <span class="label">Inventario</span>
+  </button>
+</div>
 
 <style>
-/* Ocultar botón en escritorio */
+.inventario-wrapper {
+  position: fixed;
+  bottom: 14px;
+  left: 14px;
+  z-index: 1000;
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+}
+
+/* Botón flotante oculto en escritorio */
 .inventario-btn {
   display: none;
-}
-
-/* Mostrar solo en mobile */
-@media (max-width: 768px) {
-  .inventario-btn {
-    display: flex;
-    position: fixed;
-    bottom: 20px;
-    left: 20px;
-    z-index: 1000;
-    width: 52px;
-    height: 52px;
-    border-radius: 50%;
-    background: #0B5FFF;
-    color: #fff;
-    font-size: 26px;
-    border: none;
-    box-shadow: 0 3px 10px rgba(0,0,0,0.25);
-    align-items: center;
-    justify-content: center;
-    cursor: pointer;
-  }
-
-  .inventario-btn:active {
-    transform: scale(0.95);
-  }
-}
-
-/* === ESTILO BASE (ESCRITORIO) === */
-.inventario-panel {
-  position: fixed;
-  bottom: 10px;
-  left: 10px;
-  width: 260px;
-  background: #fff;
-  border: 1px solid #ccc;
-  border-radius: 8px;
-  box-shadow: 0 2px 8px rgba(0,0,0,.2);
-  font-family: Arial;
-  z-index: 999;
-}
-
-#inv-header {
-  background: #111;
+  align-items: center;
+  gap: 8px;
+  border: none;
+  background: linear-gradient(135deg, #2563eb, #0ea5e9);
   color: #fff;
-  padding: 6px 10px;
+  padding: 12px 16px;
+  border-radius: 999px;
+  box-shadow: 0 10px 25px rgba(37, 99, 235, 0.4);
+  font-weight: 600;
   cursor: pointer;
-  border-radius: 8px 8px 0 0;
+  transition: transform 0.18s ease, box-shadow 0.18s ease;
 }
 
-#inv-body {
-  display: none;
-  max-height: 350px;
+.inventario-btn .icon {
+  font-size: 20px;
+}
+
+.inventario-btn:hover { transform: translateY(-1px); }
+.inventario-btn:active { transform: translateY(0); box-shadow: 0 8px 18px rgba(37,99,235,0.35); }
+
+/* Panel base (escritorio) */
+.inventario-panel {
+ width: 320px;
+  background: linear-gradient(180deg, #0f172a 0%, #111827 60%, #0f172a 100%);
+  color: #e5e7eb;
+  border-radius: 14px;
+  box-shadow: 0 15px 35px rgba(0,0,0,0.35);
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  overflow: hidden;
+  backdrop-filter: blur(6px);
+}
+
+.inventario-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  cursor: pointer;
+  user-select: none;
+  background: linear-gradient(90deg, rgba(59,130,246,0.25), rgba(14,165,233,0.15));
+}
+
+.inv-title {
+  font-weight: 700;
+  letter-spacing: 0.2px;
+}
+
+.inv-toggle {
+  border: none;
+  background: rgba(255,255,255,0.07);
+  color: #e5e7eb;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: transform 0.18s ease, background 0.18s ease;
+}
+
+.inv-toggle:hover { background: rgba(255,255,255,0.12); }
+.inventario-panel.collapsed .inv-toggle { transform: rotate(-90deg); }
+
+.inventario-body {
+  max-height: 360px;
   overflow-y: auto;
-  padding: 8px;
+   background: rgba(255,255,255,0.02);
+  display: none;
 }
 
-#inv-table {
+.inventario-panel:not(.collapsed) .inventario-body { display: block; }
+
+.inventario-table {
   width: 100%;
   border-collapse: collapse;
 }
 
-#inv-table td {
-  padding: 4px 6px;
-  border-bottom: 1px solid #eee;
-  font-size: 14px;
+.inventario-table tr {
+  border-bottom: 1px solid rgba(255,255,255,0.06);
 }
 
-/* === MODO MOBILE === */
+.inventario-table td {
+  padding: 12px 14px;
+  vertical-align: middle;
+}
+
+.inv-name { font-weight: 600; color: #fff; }
+.inv-meta { color: #cbd5e1; font-size: 12px; margin-top: 4px; display: flex; gap: 8px; align-items: center; }
+.inv-pill { background: rgba(59,130,246,0.18); color: #bfdbfe; padding: 2px 8px; border-radius: 999px; font-weight: 700; font-size: 12px; }
+.inv-price { font-weight: 700; color: #22c55e; text-align: right; }
+.inv-actions { text-align: right; }
+.inv-sell {
+  margin-top: 6px;
+  background: linear-gradient(135deg, #22c55e, #16a34a);
+  border: none;
+  color: #fff;
+  padding: 8px 10px;
+  border-radius: 10px;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: 0 8px 18px rgba(34,197,94,0.35);
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+.inv-sell:hover { transform: translateY(-1px); box-shadow: 0 10px 22px rgba(34,197,94,0.45); }
+.inv-sell:active { transform: translateY(0); box-shadow: 0 6px 14px rgba(34,197,94,0.35); }
+
+/* Mobile: una sola burbuja y panel moderno */
 @media (max-width: 768px) {
-  /* Ocultar panel viejo (negro) */
+ .inventario-wrapper {
+    left: 12px;
+    bottom: 12px;
+  }
+
+  .inventario-btn {
+   display: inline-flex;
+  }
+
   .inventario-panel {
     display: none;
-  }
-
-  /* Botón flotante visible solo en mobile */
-  .inventario-btn {
+    width: calc(100vw - 32px);
+    max-width: 440px;
     position: fixed;
-    bottom: 20px;
-    left: 20px;
-    z-index: 1000;
-    width: 52px;
-    height: 52px;
-    border-radius: 50%;
-    background: #0B5FFF;
-    color: #fff;
-    font-size: 26px;
-    border: none;
-    box-shadow: 0 3px 10px rgba(0,0,0,0.25);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    cursor: pointer;
+    bottom: 92px;
+    left: 16px;
+    right: 16px;
   }
+.inventario-panel.visible { display: block; }
+  .inventario-panel.collapsed .inventario-body { display: none; }
 
-  .inventario-btn:active {
-    transform: scale(0.95);
-  }
-
-  /* Panel flotante nuevo */
-  .inventario-panel.active {
-    display: block;
-    position: fixed;
-    bottom: 80px;
-    left: 10px;
-    width: 90%;
-    max-width: 320px;
-    border-radius: 12px;
-    box-shadow: 0 4px 14px rgba(0,0,0,0.3);
-    overflow: hidden;
-  }
+  .inventario-header { padding: 14px 16px; }
+  .inventario-table td { padding: 12px 16px; }
 }
 
 </style>
 
 <script>
-const invPanel = document.getElementById('box-inventario');
-const invHeader = document.getElementById('inv-header');
-const invBody = document.getElementById('inv-body');
-const btnInv = document.getElementById('btn-inventario');
+const invPanel   = document.getElementById('box-inventario');
+const invHeader  = document.getElementById('inv-header');
+const invBody    = document.getElementById('inv-body');
+const invToggle  = document.getElementById('inv-toggle');
+const btnInv     = document.getElementById('btn-inventario');
 
-// Escritorio: toggle de la barra negra original
-invHeader.onclick = () => {
-  invBody.style.display = (invBody.style.display === 'none') ? 'block' : 'none';
-};
+function toggleCollapse(){
+  invPanel.classList.toggle('collapsed');
+}
 
-// Mobile: botón flotante
-btnInv.addEventListener('click', () => {
-  invPanel.classList.toggle('active');
-});
-</script>
+function toggleMobilePanel(){
+  const isVisible = invPanel.classList.contains('visible');
+  invPanel.classList.toggle('visible', !isVisible);
+  invPanel.classList.remove('collapsed');
+}
 
-<script>
-const invBox = document.getElementById('box-inventario');
-const invHeader = document.getElementById('inv-header');
-const invBody = document.getElementById('inv-body');
-const btnInv = document.getElementById('btn-inventario');
-
-// Toggle panel (escritorio)
-invHeader.onclick = () => {
-  invBody.style.display = (invBody.style.display === 'none') ? 'block' : 'none';
-};
-
-// Toggle panel (móvil)
-btnInv.onclick = () => {
-  const isVisible = invBox.style.display === 'block';
-  invBox.style.display = isVisible ? 'none' : 'block';
-  if (!isVisible) {
-    invBox.style.position = 'fixed';
-    invBox.style.bottom = '80px';
-    invBox.style.left = '10px';
-  }
-};
-</script>
-
-<script>
-const boxInv=document.getElementById('box-inventario');
-document.getElementById('inv-header').onclick=()=>{ 
-  const b=document.getElementById('inv-body');
-  b.style.display=(b.style.display==='none'?'block':'none');
-};
+invHeader.addEventListener('click', toggleCollapse);
+invToggle.addEventListener('click', (e)=>{ e.stopPropagation(); toggleCollapse(); });
+btnInv.addEventListener('click', toggleMobilePanel);
 
 async function cargarInventario(){
   try {
@@ -2994,15 +3002,21 @@ async function cargarInventario(){
     if(j.ok && Array.isArray(j.items)){
       tb.innerHTML = j.items.map(p=>`
         <tr>
-          <td>${p.nombre}<br><small>${p.cantidad}</small></td>
-          <td style="text-align:right;">
-            $${p.precio}<br>
-            <button onclick="venderProd(${p.id})" style="background:#10b981;border:none;color:#fff;padding:2px 6px;border-radius:4px;">Vender</button>
+          <td>
+            <div class="inv-name">${p.nombre}</div>
+            <div class="inv-meta">
+              <span>Stock</span>
+              <span class="inv-pill">${p.cantidad}</span>
+            </div>
+          </td>
+          <td class="inv-actions">
+            <div class="inv-price">$${p.precio}</div>
+            <button class="inv-sell" onclick="venderProd(${p.id})">Vender</button>
           </td>
         </tr>
       `).join('');
     } else {
-      tb.innerHTML = '<tr><td colspan="2" style="text-align:center;">Sin productos</td></tr>';
+      tb.innerHTML = '<tr><td colspan="2" style="padding:14px;text-align:center;color:#cbd5e1;">Sin productos disponibles</td></tr>';
     }
 
   } catch(e) {
@@ -3012,19 +3026,19 @@ async function cargarInventario(){
 
 async function venderProd(id){
 
-  // CONFIRMACIÓN
+  
   const conf = await Swal.fire({
-    title: "¿Agregar este producto?",
-    text: "¿Desea agregar este producto al inventario?",
+    title: "¿Confirmar venta?",
+    text: "Se descontará 1 unidad del stock.",
     icon: "question",
     showCancelButton: true,
-    confirmButtonText: "Sí, agregar",
+    confirmButtonText: "Sí, vender",
     cancelButtonText: "Cancelar"
   });
 
   if (!conf.isConfirmed) return; // ❌ si cancela, no vende
 
-  // ✔ si confirma, vende
+  
   const r = await fetch('', {
     method:'POST',
     headers:{'Content-Type':'application/x-www-form-urlencoded'},
@@ -3072,9 +3086,9 @@ document.addEventListener('DOMContentLoaded', ()=>{
     if (isMinibar) {
       // 🧃 Formato MINIBAR
       const prod = cells[1]?.innerText.trim() || '-';
-      const hora = cells[3]?.innerText.trim() || '-';
-      const monto = cells[4]?.innerText.trim() || '$0';
-      summaryHTML = `<span>Prod: ${prod}</span><span>Hora: ${monto}</span><span>Mto: ${hora}</span>`;
+      const hora = cells[2]?.innerText.trim() || '-';
+      const monto = cells[3]?.innerText.trim() || '$0';
+      summaryHTML = `<span>Prod: ${prod}</span><span>Hora: ${hora}</span><span>Mto: ${monto}</span>`;
     } else {
       // 🛏️ Formato HABITACIONES
       const hab = cells[0]?.innerText.trim() || '-';
