@@ -234,6 +234,18 @@ function nowArgDT(){ return new DateTime('now', new DateTimeZone('America/Argent
 function nowUTCStrFromArg(){ $dt=nowArgDT(); $dt->setTimezone(new DateTimeZone('UTC')); return $dt->format('Y-m-d H:i:s'); }
 function argDateToday(){ return nowArgDT()->format('Y-m-d'); }
 function toArgDT($utc){ if(!$utc) return null; $dt=new DateTime($utc,new DateTimeZone('UTC')); $dt->setTimezone(new DateTimeZone('America/Argentina/Buenos_Aires')); return $dt; }
+function argDateRangeToUtcBounds(string $date){
+  $tzArg = new DateTimeZone('America/Argentina/Buenos_Aires');
+  $tzUtc = new DateTimeZone('UTC');
+
+  $start = new DateTime($date.' 00:00:00', $tzArg);
+  $start->setTimezone($tzUtc);
+
+  $end = new DateTime($date.' 23:59:59', $tzArg);
+  $end->setTimezone($tzUtc);
+
+  return [$start->format('Y-m-d H:i:s'), $end->format('Y-m-d H:i:s')];
+}
 function toArgTs($utc){
   if(!$utc) return null;
   $dtUtc = new DateTime($utc, new DateTimeZone('UTC'));
@@ -2080,15 +2092,18 @@ document.addEventListener('DOMContentLoaded', ()=>{
   $rows = [];
   $total = 0;
 
- $sql = "
-  SELECT id, producto_id, nombre, precio, hora, turno,
-         hora AS hora_local
-  FROM ventas_turno
-  WHERE hora BETWEEN CONCAT(?, ' 00:00:00') AND CONCAT(?, ' 23:59:59')
-  ORDER BY hora DESC
-";
+ list($desdeUtc,) = argDateRangeToUtcBounds($desde);
+  list(,$hastaUtc) = argDateRangeToUtcBounds($hasta);
+
+  $sql = "
+    SELECT id, producto_id, nombre, precio, hora,
+           hora AS hora_local
+    FROM ventas_turno
+    WHERE hora BETWEEN ? AND ?
+    ORDER BY hora DESC
+  ";
   $stmt = $conn->prepare($sql);
-  $stmt->bind_param('ss', $desde, $hasta);
+  $stmt->bind_param('ss', $desdeUtc, $hastaUtc);
   $stmt->execute();
   $res = $stmt->get_result();
   while($r = $res->fetch_assoc()){
@@ -2117,11 +2132,10 @@ document.addEventListener('DOMContentLoaded', ()=>{
     <table class="table">
       <thead>
         <tr>
-          <th>ID</th>
+          <th>Cant.</th>
           <th>Producto</th>
-          <th>Turno</th>
-          <th>Hora Venta</th>
-          <th>Precio</th>
+          <th>Hora de venta</th>
+          <th>Monto</th>
         </tr>
       </thead>
       <tbody>
@@ -2129,11 +2143,10 @@ document.addEventListener('DOMContentLoaded', ()=>{
           <tr><td colspan="5" style="text-align:center;color:#64748B;padding:18px;">Sin ventas registradas</td></tr>
         <?php else: foreach($rows as $r): ?>
           <tr style="background:#f0fff4;">
-            <td><?=$r['id']?></td>
-            <td>🧃 <?=safe($r['nombre'])?></td>
-            <td><?=safe($r['turno'])?></td>
-            <td><?=safe(fmtHoraArg($r['hora_local']))?></td>
-            <td style="text-align:right;">$ <?=number_format((int)$r['precio'],0,',','.')?></td>
+            <td data-label="Cant.">1</td>
+            <td data-label="Producto">🧃 <?=safe($r['nombre'])?></td>
+            <td data-label="Hora de venta"><?=safe(fmtHoraArg($r['hora_local']))?></td>
+            <td data-label="Monto" style="text-align:right;">$ <?=number_format((int)$r['precio'],0,',','.')?></td>
           </tr>
         <?php endforeach; endif; ?>
       </tbody>
@@ -3059,9 +3072,9 @@ document.addEventListener('DOMContentLoaded', ()=>{
     if (isMinibar) {
       // 🧃 Formato MINIBAR
       const prod = cells[1]?.innerText.trim() || '-';
-      const turno = cells[4]?.innerText.trim() || '-';
-      const monto = cells[3]?.innerText.trim() || '$0';
-      summaryHTML = `<span>Prod: ${prod}</span><span>Turno: ${turno}</span><span>Mto: ${monto}</span>`;
+      const hora = cells[3]?.innerText.trim() || '-';
+      const monto = cells[4]?.innerText.trim() || '$0';
+      summaryHTML = `<span>Prod: ${prod}</span><span>Hora: ${monto}</span><span>Mto: ${hora}</span>`;
     } else {
       // 🛏️ Formato HABITACIONES
       const hab = cells[0]?.innerText.trim() || '-';
@@ -3077,7 +3090,7 @@ document.addEventListener('DOMContentLoaded', ()=>{
         if (h > 10 || (h === 10 && m > 15)) durClass = 'duracion-larga';
       }
 
-      summaryHTML = `<span>Hab: ${hab}</span><span class="${durClass}">Dur: ${dur}</span><span>Mto: ${monto}</span>`;
+      summaryHTML = `<span>Hab: ${hab}</span><span class="${durClass}">Dur: ${monto}</span><span>Mto: ${monto}</span>`;
     }
 
     // Crear tarjeta
