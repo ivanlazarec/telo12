@@ -65,10 +65,9 @@ if($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion']) && $_POST['acc
   $p=$conn->query("SELECT nombre,precio FROM inventario_productos WHERE id=$id")->fetch_assoc();
   $cur=$conn->query("SELECT turno FROM turno_actual WHERE id=1")->fetch_assoc();
   $turno=$cur['turno']??'manana';
-  $st=$conn->prepare("INSERT INTO ventas_turno(producto_id,nombre,precio,hora,turno,monto_efectivo,monto_digital,forma_pago,cambio_forma_pago) VALUES(?,?,?,?,?,?,?, 'efectivo',0)");
+  $st=$conn->prepare("INSERT INTO ventas_turno(producto_id,nombre,precio,hora,turno) VALUES(?,?,?,?,?)");
   $ahora=nowUTCStrFromArg();
-  $precioInt = (int)($p['precio'] ?? 0);
-  $st->bind_param('isissii',$id,$p['nombre'],$precioInt,$ahora,$turno,$precioInt,$cero=0);
+  $st->bind_param('issss',$id,$p['nombre'],$p['precio'],$ahora,$turno);
   $st->execute();$st->close();
 
   echo json_encode(['ok'=>1]);
@@ -135,43 +134,13 @@ $conn->query("CREATE TABLE IF NOT EXISTS historial_habitaciones (
   precio_aplicado INT NULL,    -- ENTERO redondeado, snapshot del precio al crear
   bloques INT NOT NULL DEFAULT 1, -- cantidad de turnos acumulados
   es_extra TINYINT(1) NOT NULL DEFAULT 0, -- 0=normal, 1=extra
-  monto_efectivo INT NOT NULL DEFAULT 0,
-  monto_digital INT NOT NULL DEFAULT 0,
-  forma_pago VARCHAR(20) NOT NULL DEFAULT 'efectivo',
-  cambio_forma_pago TINYINT(1) NOT NULL DEFAULT 0,
   INDEX(habitacion), INDEX(fecha_registro), INDEX(turno)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
-
 
 /* Migraciones suaves (por si faltan columnas) */
 @$conn->query("ALTER TABLE historial_habitaciones ADD COLUMN IF NOT EXISTS precio_aplicado INT NULL");
 @$conn->query("ALTER TABLE historial_habitaciones ADD COLUMN IF NOT EXISTS es_extra TINYINT(1) NOT NULL DEFAULT 0");
 @$conn->query("ALTER TABLE historial_habitaciones ADD COLUMN IF NOT EXISTS bloques INT NOT NULL DEFAULT 1");
-@$conn->query("ALTER TABLE historial_habitaciones ADD COLUMN IF NOT EXISTS monto_efectivo INT NOT NULL DEFAULT 0");
-@$conn->query("ALTER TABLE historial_habitaciones ADD COLUMN IF NOT EXISTS monto_digital INT NOT NULL DEFAULT 0");
-@$conn->query("ALTER TABLE historial_habitaciones ADD COLUMN IF NOT EXISTS forma_pago VARCHAR(20) NOT NULL DEFAULT 'efectivo'");
-@$conn->query("ALTER TABLE historial_habitaciones ADD COLUMN IF NOT EXISTS cambio_forma_pago TINYINT(1) NOT NULL DEFAULT 0");
-$conn->query("UPDATE historial_habitaciones SET monto_efectivo = COALESCE(precio_aplicado,0), forma_pago='efectivo' WHERE monto_efectivo=0 AND monto_digital=0 AND precio_aplicado IS NOT NULL");
-
-/* ====== ventas_turno (minibar + extras de caja) ====== */
-$conn->query("CREATE TABLE IF NOT EXISTS ventas_turno (
-  id INT AUTO_INCREMENT PRIMARY KEY,
-  producto_id INT NOT NULL,
-  nombre VARCHAR(150) NOT NULL,
-  precio INT NOT NULL DEFAULT 0,
-  hora DATETIME NOT NULL,
-  turno VARCHAR(20) NOT NULL,
-  monto_efectivo INT NOT NULL DEFAULT 0,
-  monto_digital INT NOT NULL DEFAULT 0,
-  forma_pago VARCHAR(20) NOT NULL DEFAULT 'efectivo',
-  cambio_forma_pago TINYINT(1) NOT NULL DEFAULT 0,
-  INDEX(hora)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
-@$conn->query("ALTER TABLE ventas_turno ADD COLUMN IF NOT EXISTS monto_efectivo INT NOT NULL DEFAULT 0");
-@$conn->query("ALTER TABLE ventas_turno ADD COLUMN IF NOT EXISTS monto_digital INT NOT NULL DEFAULT 0");
-@$conn->query("ALTER TABLE ventas_turno ADD COLUMN IF NOT EXISTS forma_pago VARCHAR(20) NOT NULL DEFAULT 'efectivo'");
-@$conn->query("ALTER TABLE ventas_turno ADD COLUMN IF NOT EXISTS cambio_forma_pago TINYINT(1) NOT NULL DEFAULT 0");
-$conn->query("UPDATE ventas_turno SET monto_efectivo = COALESCE(precio,0), forma_pago='efectivo' WHERE monto_efectivo=0 AND monto_digital=0");
 /* ====== precios_habitaciones (incluye noche-finde) ====== */
 $conn->query("
 CREATE TABLE IF NOT EXISTS precios_habitaciones (
@@ -453,8 +422,8 @@ function turnoActual($conn){
 
 /* Suma de caja de un rango [inicioUTC, finUTC) contando $ al INICIO de la ocupación */
 function cajaTotalDesdeHasta($conn,$inicioUTC,$finUTC=null){
-  // Ingresos por habitaciones (solo efectivo)
-  $sqlHab = "SELECT SUM(monto_efectivo) total, COUNT(*) cant
+  // Ingresos por habitaciones
+  $sqlHab = "SELECT SUM(precio_aplicado) total, COUNT(*) cant
              FROM historial_habitaciones
              WHERE hora_inicio >= ? AND codigo IS NULL".($finUTC?" AND hora_inicio < ?":"");
   $st = $conn->prepare($sqlHab);
@@ -462,16 +431,23 @@ function cajaTotalDesdeHasta($conn,$inicioUTC,$finUTC=null){
   $st->execute(); $resHab = $st->get_result()->fetch_assoc(); $st->close();
 
   // Ventas de minibar (efectivo)
-  $sqlVen = "SELECT SUM(monto_efectivo) total FROM ventas_turno WHERE hora >= ?".($finUTC?" AND hora < ?":"");
+  $sqlVen = "SELECT SUM(precio) total FROM ventas_turno WHERE hora >= ?".($finUTC?" AND hora < ?":"");
   $st = $conn->prepare($sqlVen);
   if($finUTC){ $st->bind_param('ss',$inicioUTC,$finUTC); } else { $st->bind_param('s',$inicioUTC); }
     $st->execute(); $resVen = $st->get_result()->fetch_assoc(); $st->close();
 
-  
+  // Ajustes por pagos online (se descuentan de la caja en efectivo)
+  $sqlPg = "SELECT SUM(monto) total FROM pagos_online_habitaciones WHERE created_at >= ?".($finUTC?" AND created_at < ?":"");
+  $st = $conn->prepare($sqlPg);
+  if($finUTC){ $st->bind_param('ss',$inicioUTC,$finUTC); } else { $st->bind_param('s',$inicioUTC); }
+  $st->execute(); $resPg = $st->get_result()->fetch_assoc(); $st->close();
+
   $totalHab = (int)($resHab['total'] ?? 0);
   $cantHab  = (int)($resHab['cant'] ?? 0);
   $totalVen = (int)($resVen['total'] ?? 0);
-  $totalCaja = $totalHab + $totalVen; // caja solo cuenta efectivo
+  $totalPg  = (int)($resPg['total'] ?? 0);
+
+  $totalCaja = $totalHab + $totalVen - $totalPg; // online resta efectivo
 
   return [ $totalCaja, $cantHab ];
 }
@@ -484,7 +460,7 @@ function cajaDetalleDesdeHasta($conn,$inicioUTC,$finUTC=null,$limit=150){
         habitacion,
         CONVERT(turno USING utf8mb4) COLLATE $col AS turno,
         hora_inicio,
-        monto_efectivo AS monto,
+        precio_aplicado AS monto,
         'hab' COLLATE $col AS tipo,
         NULL AS nombre
      FROM historial_habitaciones
@@ -495,7 +471,7 @@ function cajaDetalleDesdeHasta($conn,$inicioUTC,$finUTC=null,$limit=150){
         NULL AS habitacion,
         CONVERT(turno USING utf8mb4) COLLATE $col AS turno,
         hora AS hora_inicio,
-        monto_efectivo AS monto,
+        precio AS monto,
         'venta' COLLATE $col AS tipo,
         CONVERT(nombre USING utf8mb4) COLLATE $col AS nombre
      FROM ventas_turno
@@ -506,7 +482,7 @@ function cajaDetalleDesdeHasta($conn,$inicioUTC,$finUTC=null,$limit=150){
         habitacion,
         CONVERT(turno USING utf8mb4) COLLATE $col AS turno,
         created_at AS hora_inicio,
-        0 AS monto,
+        (monto * -1) AS monto,
         'ajuste' COLLATE $col AS tipo,
         'Pago online' COLLATE $col AS nombre
      FROM pagos_online_habitaciones
@@ -626,7 +602,7 @@ if ($accion === 'ack_minibar') {
     $conn->begin_transaction();
 
     // 1) Marcar alerta como atendida y obtener la habitación
-    $sel = $conn->prepare("SELECT habitacion, monto FROM pagos_online_habitaciones WHERE id=? LIMIT 1 FOR UPDATE");
+    $sel = $conn->prepare("SELECT habitacion FROM pagos_online_habitaciones WHERE id=? LIMIT 1 FOR UPDATE");
     $sel->bind_param('i', $id);
     $sel->execute();
     $row = $sel->get_result()->fetch_assoc();
@@ -641,7 +617,6 @@ if ($accion === 'ack_minibar') {
     $habitacion = intval($row['habitacion'] ?? 0);
     $pagoTurno = strval($row['turno'] ?? '');
     $pagoBloques = max(1, intval($row['bloques'] ?? 1));
-    $pagoMonto = max(0, intval($row['monto'] ?? 0));
     $pagoFecha = $row['created_at'] ?? null;
 
     // 2) Ajustar el registro manual según la hora del pago (ventana 20 minutos)
@@ -651,7 +626,7 @@ if ($accion === 'ack_minibar') {
       $window->modify('-20 minutes');
       $limiteStr = $window->format('Y-m-d H:i:s');
 
-      $selHist = $conn->prepare("SELECT id, bloques, precio_aplicado, monto_efectivo, monto_digital FROM historial_habitaciones WHERE habitacion=? AND codigo IS NULL AND hora_fin IS NULL AND hora_inicio >= ? ORDER BY id DESC LIMIT 1");
+      $selHist = $conn->prepare("SELECT id, bloques, precio_aplicado FROM historial_habitaciones WHERE habitacion=? AND codigo IS NULL AND hora_fin IS NULL AND hora_inicio >= ? ORDER BY id DESC LIMIT 1");
       $selHist->bind_param('is', $habitacion, $limiteStr);
       $selHist->execute();
       $histRow = $selHist->get_result()->fetch_assoc();
@@ -659,18 +634,15 @@ if ($accion === 'ack_minibar') {
 
       if ($histRow && ($histRow['id'] ?? null)) {
         $hid = intval($histRow['id']);
-        
+        $bloquesActuales = max(1, intval($histRow['bloques'] ?? 1));
         $precioActual = max(0, intval($histRow['precio_aplicado'] ?? 0));
-        $efectivoActual = max(0, intval($histRow['monto_efectivo'] ?? $precioActual));
-        $digitalActual = max(0, intval($histRow['monto_digital'] ?? 0));
+        $bloquesADescontar = min($bloquesActuales, $pagoBloques);
+        $precioPorBloque = $bloquesActuales > 0 ? (int) round($precioActual / $bloquesActuales) : 0;
+        $nuevoPrecio = max(0, $precioActual - ($precioPorBloque * $bloquesADescontar));
+        $bloquesRestantes = max(0, $bloquesActuales - $bloquesADescontar);
 
-        $montoAplicado = min($efectivoActual, $pagoMonto);
-        $nuevoEfectivo = max(0, $efectivoActual - $montoAplicado);
-        $nuevoDigital = $digitalActual + $pagoMonto;
-        $nuevaForma = $nuevoEfectivo > 0 && $nuevoDigital > 0 ? 'mixto' : ($nuevoEfectivo > 0 ? 'efectivo' : 'digital');
-
-        $updHist = $conn->prepare("UPDATE historial_habitaciones SET codigo='pago_online', monto_efectivo=?, monto_digital=?, forma_pago=?, cambio_forma_pago=1 WHERE id=?");
-        $updHist->bind_param('iisi', $nuevoEfectivo, $nuevoDigital, $nuevaForma, $hid);
+        $updHist = $conn->prepare("UPDATE historial_habitaciones SET codigo='pago_online', precio_aplicado=?, bloques=? WHERE id=?");
+        $updHist->bind_param('iii', $nuevoPrecio, $bloquesRestantes, $hid);
         $updHist->execute();
         $updHist->close();
       }
@@ -804,18 +776,17 @@ if ($accion === 'mover_reserva') {
             $bloquesActuales = max(1,(int)($curOpen['bloques'] ?? 1)) + 1;
             $precioExtra = precioVigenteInt($conn, $tipoHab, $turnoHabitacion);
 
-            $upd = $conn->prepare("UPDATE historial_habitaciones SET bloques=?, precio_aplicado = COALESCE(precio_aplicado,0)+?, monto_efectivo = COALESCE(monto_efectivo,0)+? WHERE id=?");
-            $upd->bind_param('iiii',$bloquesActuales,$precioExtra,$precioExtra,$curOpen['id']);
+            $upd = $conn->prepare("UPDATE historial_habitaciones SET bloques=?, precio_aplicado = COALESCE(precio_aplicado,0)+? WHERE id=?");
+            $upd->bind_param('iii',$bloquesActuales,$precioExtra,$curOpen['id']);
             $upd->execute();
             $upd->close();
         } else {
             // precio vigente congelado
             $precio = precioVigenteInt($conn, $tipoHab, $turnoTag);
 
-            $ins=$conn->prepare("INSERT INTO historial_habitaciones (habitacion,tipo,estado,turno,hora_inicio,fecha_registro,precio_aplicado,es_extra,bloques,monto_efectivo,monto_digital,forma_pago,cambio_forma_pago)
-                             VALUES (?,?,?,?,?,?,?,?,?,?,?,'efectivo',0)");
-            $montoDigital = 0;
-            $ins->bind_param('isssssiiiii',$id,$tipoHab,$estado,$turnoTag,$startUTC,$fecha,$precio,$ceroExtra=0,$bloques=1,$precio,$montoDigital);
+            $ins=$conn->prepare("INSERT INTO historial_habitaciones (habitacion,tipo,estado,turno,hora_inicio,fecha_registro,precio_aplicado,es_extra,bloques)
+                             VALUES (?,?,?,?,?,?,?,0,1)");
+            $ins->bind_param('isssssi',$id,$tipoHab,$estado,$turnoTag,$startUTC,$fecha,$precio);
             $ins->execute();
             $ins->close();
         }
@@ -868,10 +839,9 @@ $st->close();
 
       // crear registro (normal, no extra)  **FIX de tipos en bind_param: 'isssssi'**
       $estado='ocupada';
-        $ins=$conn->prepare("INSERT INTO historial_habitaciones (habitacion,tipo,estado,turno,hora_inicio,fecha_registro,precio_aplicado,es_extra,bloques,monto_efectivo,monto_digital,forma_pago,cambio_forma_pago)
-                          VALUES (?,?,?,?,?,?,?,?,?,?,?,'efectivo',0)");
-      $montoDigital = 0;
-      $ins->bind_param('isssssiiiii',$id,$tipoHab,$estado,$turno,$startUTC,$fecha,$precio,$ceroExtra=0,$bloques=1,$precio,$montoDigital);
+        $ins=$conn->prepare("INSERT INTO historial_habitaciones (habitacion,tipo,estado,turno,hora_inicio,fecha_registro,precio_aplicado,es_extra,bloques)
+                          VALUES (?,?,?,?,?,?,?,0,1)");
+      $ins->bind_param('isssssi',$id,$tipoHab,$estado,$turno,$startUTC,$fecha,$precio);
       $ins->execute(); $ins->close();
     }
     if(!empty($errors)){
@@ -907,16 +877,15 @@ if($accion==='reactivar_extra'){
         $bloquesActuales = max(1,(int)($curOpen['bloques'] ?? 1)) + 1;
         $precioExtra = precioVigenteInt($conn, $tipoHab, $turnoHabitacion);
 
-        $upd = $conn->prepare("UPDATE historial_habitaciones SET bloques=?, precio_aplicado = COALESCE(precio_aplicado,0)+?, monto_efectivo = COALESCE(monto_efectivo,0)+?, es_extra=1 WHERE id=?");
-        $upd->bind_param('iiii',$bloquesActuales,$precioExtra,$precioExtra,$curOpen['id']);
+        $upd = $conn->prepare("UPDATE historial_habitaciones SET bloques=?, precio_aplicado = COALESCE(precio_aplicado,0)+?, es_extra=1 WHERE id=?");
+        $upd->bind_param('iii',$bloquesActuales,$precioExtra,$curOpen['id']);
         $upd->execute();
         $upd->close();
     } else {
         $estado='ocupada';
-        $ins=$conn->prepare("INSERT INTO historial_habitaciones (habitacion,tipo,estado,turno,hora_inicio,fecha_registro,precio_aplicado,es_extra,bloques,monto_efectivo,monto_digital,forma_pago,cambio_forma_pago)
-                         VALUES (?,?,?,?,?,?,?,?,?,?,?,'efectivo',0)");
-    $montoDigital = 0;
-    $ins->bind_param('isssssiiiii',$id,$tipoHab,$estado,$turnoTag,$startUTC,$fecha,$precio,$uno=1,$bloques=1,$precio,$montoDigital);
+        $ins=$conn->prepare("INSERT INTO historial_habitaciones (habitacion,tipo,estado,turno,hora_inicio,fecha_registro,precio_aplicado,es_extra,bloques)
+                         VALUES (?,?,?,?,?,?,?,1,1)");
+    $ins->bind_param('isssssi',$id,$tipoHab,$estado,$turnoTag,$startUTC,$fecha,$precio);
         $ins->execute();
         $ins->close();
     }
@@ -1630,24 +1599,6 @@ foreach ($rows as $r) {
 $promedio_turno = ($cantidad_turnos > 0)
     ? round($total_caja / $cantidad_turnos)
     : 0;
-    
-// Totales por forma de pago (habitaciones cerradas)
-$totSql = "SELECT SUM(monto_efectivo) AS eff, SUM(monto_digital) AS dig FROM historial_habitaciones WHERE hora_fin IS NOT NULL";
-$bindTypes = '';
-$bindParams = [];
-
-if ($desde !== '') { $totSql .= " AND fecha_registro >= ?"; $bindTypes .= 's'; $bindParams[] = $desde; }
-if ($hasta !== '') { $totSql .= " AND fecha_registro <= ?"; $bindTypes .= 's'; $bindParams[] = $hasta; }
-
-$totStmt = $conn->prepare($totSql);
-if ($bindTypes !== '') { $totStmt->bind_param($bindTypes, ...$bindParams); }
-$totStmt->execute();
-$totRes = $totStmt->get_result()->fetch_assoc();
-$totStmt->close();
-
-$totalEfe = (int)($totRes['eff'] ?? 0);
-$totalDig = (int)($totRes['dig'] ?? 0);
-$totalGen = $totalEfe + $totalDig;
 
 ?>
 
@@ -1700,11 +1651,6 @@ $totalGen = $totalEfe + $totalDig;
   </div>
 </div>
 
-<div style="display:flex; gap:8px; flex-wrap:wrap; margin-left:auto;">
-  <div class="chip" style="background:#e8fff1;">Total efectivo: <b>$ <?= number_format($totalEfe, 0, ',', '.') ?></b></div>
-  <div class="chip" style="background:#e8f1ff;">Total digital: <b>$ <?= number_format($totalDig, 0, ',', '.') ?></b></div>
-  <div class="chip" style="background:#fff7e8;">Total general: <b>$ <?= number_format($totalGen, 0, ',', '.') ?></b></div>
-</div>
 
 </form>
 
@@ -2006,9 +1952,9 @@ document.addEventListener("click", async e => {
   $hasta = preg_replace('/[^0-9\-]/','', $_GET['hasta'] ?? argDateToday());
   $tipoF = $_GET['tipo'] ?? 'todos';
 
-  $summary = ['total'=>0,'super'=>0,'vip'=>0,'comun'=>0,'t2'=>0,'t3'=>0,'tnoche'=>0];
+  $summary = ['total'=>0,'super'=>0,'vip'=>0,'comun'=>0,'t2'=>0,'t3'=>0,'tnoche'=>0,'monto'=>0];
   $rows = [];
-  $sql = "SELECT habitacion, tipo, estado, turno, hora_inicio, hora_fin, duracion_minutos, fecha_registro, precio_aplicado, es_extra, monto_efectivo, monto_digital, forma_pago, cambio_forma_pago
+  $sql = "SELECT habitacion, tipo, estado, turno, hora_inicio, hora_fin, duracion_minutos, fecha_registro, precio_aplicado, es_extra
           FROM historial_habitaciones
           WHERE fecha_registro BETWEEN ? AND ?";
   if($tipoF!=='todos') $sql.=" AND tipo=?";
@@ -2022,8 +1968,15 @@ document.addEventListener("click", async e => {
     if($r['tipo']==='Super VIP') $summary['super']++; elseif($r['tipo']==='VIP') $summary['vip']++; else $summary['comun']++;
     if($r['turno']==='turno-2h') $summary['t2']++; elseif($r['turno']==='turno-3h') $summary['t3']++; elseif($r['turno']==='noche' || $r['turno']==='noche-finde') $summary['tnoche']++;
 
+    // Total del día: SOLO registros cerrados (hora_fin no nula), normal + extra
+    if(!empty($r['hora_fin'])){
+      $summary['monto'] += (int)($r['precio_aplicado'] ?? 0);
+    }
   }
   $stmt->close();
+
+  // Formateo de total con separador de miles (AR)
+  $fmtTotal = number_format((int)$summary['monto'], 0, ',', '.');
 ?>
 <main class="container">
   <div class="card">
@@ -2073,7 +2026,7 @@ document.addEventListener("click", async e => {
         <th>Año</th>
         <th>Hora Final</th> <!-- ARG sin segundos -->
         <th>Duración (min)</th>
-        <th>Monto (efectivo / digital)</th>
+        <th>Monto</th>
       </tr>
     </thead>
     <tbody>
@@ -2090,7 +2043,7 @@ document.addEventListener("click", async e => {
       <td data-label="Año"><?= safe(partAnio($r['hora_inicio'])) ?></td>
       <td data-label="Hora Final"><?= safe(fmtHoraArg($r['hora_fin'])) ?></td>
       <td data-label="Duración (min)"><?= safe($r['duracion_minutos']) ?></td>
-      <td data-label="Monto (efectivo / digital)">$ <?= number_format((int)($r['monto_efectivo']??0),0,',','.') ?> / $ <?= number_format((int)($r['monto_digital']??0),0,',','.') ?></td>
+      <td data-label="Monto">$ <?= number_format((int)($r['precio_aplicado']??0),0,',','.') ?></td>
     </tr>
   <?php endforeach; endif; ?>
 </tbody>
@@ -2143,7 +2096,7 @@ document.addEventListener('DOMContentLoaded', ()=>{
   list(,$hastaUtc) = argDateRangeToUtcBounds($hasta);
 
   $sql = "
-    SELECT id, producto_id, nombre, monto_efectivo AS precio, hora,
+    SELECT id, producto_id, nombre, precio, hora,
            hora AS hora_local
     FROM ventas_turno
     WHERE hora BETWEEN ? AND ?
