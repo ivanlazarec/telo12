@@ -25,9 +25,9 @@ $CLAVE_ADMIN = "Mora2025";
 
 /* ================= AJAX Inventario ================= */
 if ($_SERVER['REQUEST_METHOD']==='GET' && isset($_GET['ajax_inv'])){
- $res=$conn->query("SELECT id,nombre,precio,cantidad,total_turno 
-                    FROM inventario_productos 
-                    WHERE activo = 1
+  $res=$conn->query("SELECT id,nombre,precio,cantidad,total_turno
+                    FROM inventario_productos
+                    WHERE activo = 1 AND cantidad > 0
                     ORDER BY nombre ASC");
 $items=[];
 while($r=$res->fetch_assoc()){
@@ -48,12 +48,17 @@ while($r=$res->fetch_assoc()){
 if($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion']) && $_POST['accion']==='vender_producto'){
   $id=intval($_POST['id']);
 
-  // Descontar stock actual
- $conn->query("UPDATE inventario_productos 
-              SET 
-                cantidad = GREATEST(cantidad-1,0),
-                total_turno = GREATEST(total_turno-1,0)
-              WHERE id = $id");
+  // Descontar stock actual (solo si hay stock)
+  $conn->query("UPDATE inventario_productos
+                SET
+                  cantidad = GREATEST(cantidad-1,0),
+                  total_turno = GREATEST(total_turno-1,0)
+                WHERE id = $id AND cantidad > 0");
+
+  if ($conn->affected_rows === 0) {
+    echo json_encode(['ok' => 0, 'msg' => 'Sin stock disponible']);
+    exit;
+  }
 
 
   // Guardar venta
@@ -3014,10 +3019,17 @@ async function venderProd(id){
   });
 
   const j = await r.json();
-  if(j.ok){
-    cargarInventario();
-    actualizarTurnoBox();
+  if(!j.ok){
+    Swal.fire({
+      icon: 'warning',
+      title: 'Sin stock',
+      text: j.msg || 'No hay stock disponible para vender'
+    });
+    return;
   }
+  
+  cargarInventario();
+  actualizarTurnoBox();
 }
 
 setInterval(cargarInventario, 5000);
