@@ -1630,6 +1630,24 @@ foreach ($rows as $r) {
 $promedio_turno = ($cantidad_turnos > 0)
     ? round($total_caja / $cantidad_turnos)
     : 0;
+    
+// Totales por forma de pago (habitaciones cerradas)
+$totSql = "SELECT SUM(monto_efectivo) AS eff, SUM(monto_digital) AS dig FROM historial_habitaciones WHERE hora_fin IS NOT NULL";
+$bindTypes = '';
+$bindParams = [];
+
+if ($desde !== '') { $totSql .= " AND fecha_registro >= ?"; $bindTypes .= 's'; $bindParams[] = $desde; }
+if ($hasta !== '') { $totSql .= " AND fecha_registro <= ?"; $bindTypes .= 's'; $bindParams[] = $hasta; }
+
+$totStmt = $conn->prepare($totSql);
+if ($bindTypes !== '') { $totStmt->bind_param($bindTypes, ...$bindParams); }
+$totStmt->execute();
+$totRes = $totStmt->get_result()->fetch_assoc();
+$totStmt->close();
+
+$totalEfe = (int)($totRes['eff'] ?? 0);
+$totalDig = (int)($totRes['dig'] ?? 0);
+$totalGen = $totalEfe + $totalDig;
 
 ?>
 
@@ -1682,6 +1700,11 @@ $promedio_turno = ($cantidad_turnos > 0)
   </div>
 </div>
 
+<div style="display:flex; gap:8px; flex-wrap:wrap; margin-left:auto;">
+  <div class="chip" style="background:#e8fff1;">Total efectivo: <b>$ <?= number_format($totalEfe, 0, ',', '.') ?></b></div>
+  <div class="chip" style="background:#e8f1ff;">Total digital: <b>$ <?= number_format($totalDig, 0, ',', '.') ?></b></div>
+  <div class="chip" style="background:#fff7e8;">Total general: <b>$ <?= number_format($totalGen, 0, ',', '.') ?></b></div>
+</div>
 
 </form>
 
@@ -1983,7 +2006,7 @@ document.addEventListener("click", async e => {
   $hasta = preg_replace('/[^0-9\-]/','', $_GET['hasta'] ?? argDateToday());
   $tipoF = $_GET['tipo'] ?? 'todos';
 
-  $summary = ['total'=>0,'super'=>0,'vip'=>0,'comun'=>0,'t2'=>0,'t3'=>0,'tnoche'=>0,'monto_efectivo'=>0,'monto_digital'=>0];
+  $summary = ['total'=>0,'super'=>0,'vip'=>0,'comun'=>0,'t2'=>0,'t3'=>0,'tnoche'=>0];
   $rows = [];
   $sql = "SELECT habitacion, tipo, estado, turno, hora_inicio, hora_fin, duracion_minutos, fecha_registro, precio_aplicado, es_extra, monto_efectivo, monto_digital, forma_pago, cambio_forma_pago
           FROM historial_habitaciones
@@ -1999,19 +2022,8 @@ document.addEventListener("click", async e => {
     if($r['tipo']==='Super VIP') $summary['super']++; elseif($r['tipo']==='VIP') $summary['vip']++; else $summary['comun']++;
     if($r['turno']==='turno-2h') $summary['t2']++; elseif($r['turno']==='turno-3h') $summary['t3']++; elseif($r['turno']==='noche' || $r['turno']==='noche-finde') $summary['tnoche']++;
 
-    // Total del día: SOLO registros cerrados (hora_fin no nula), normal + extra
-    if(!empty($r['hora_fin'])){
-      $summary['monto_efectivo'] += (int)($r['monto_efectivo'] ?? ($r['precio_aplicado'] ?? 0));
-      $summary['monto_digital']  += (int)($r['monto_digital'] ?? 0);
-    }
   }
   $stmt->close();
-
-  // Formateo de total con separador de miles (AR)
-  $totalGeneral = $summary['monto_efectivo'] + $summary['monto_digital'];
-  $fmtTotalEfe = number_format((int)$summary['monto_efectivo'], 0, ',', '.');
-  $fmtTotalDig = number_format((int)$summary['monto_digital'], 0, ',', '.');
-  $fmtTotalGen = number_format((int)$totalGeneral, 0, ',', '.');
 ?>
 <main class="container">
   <div class="card">
@@ -2045,9 +2057,6 @@ document.addEventListener("click", async e => {
       <div class="chip">Turno 2h: <b><?php echo $summary['t2']; ?></b></div>
       <div class="chip">Turno 3h: <b><?php echo $summary['t3']; ?></b></div>
       <div class="chip">Noche: <b><?php echo $summary['tnoche']; ?></b></div>
-      <div class="chip" style="background:#e8fff1;">Total efectivo: <b>$ <?php echo $fmtTotalEfe; ?></b></div>
-      <div class="chip" style="background:#e8f1ff;">Total digital: <b>$ <?php echo $fmtTotalDig; ?></b></div>
-      <div class="chip" style="background:#fff7e8;">Total general: <b>$ <?php echo $fmtTotalGen; ?></b></div>
 
     </div>
 
