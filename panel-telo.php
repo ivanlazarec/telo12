@@ -2973,94 +2973,97 @@ startPagoOnlineAlerts();
 </style>
 
 <script>
-const invPanel   = document.getElementById('box-inventario');
-const invHeader  = document.getElementById('inv-header');
-const invBody    = document.getElementById('inv-body');
-const invToggle  = document.getElementById('inv-toggle');
-const btnInv     = document.getElementById('btn-inventario');
+document.addEventListener('DOMContentLoaded', ()=>{
+  const invPanel   = document.getElementById('box-inventario');
+  const invHeader  = document.getElementById('inv-header');
+  const invBody    = document.getElementById('inv-body');
+  const invToggle  = document.getElementById('inv-toggle');
+  const btnInv     = document.getElementById('btn-inventario');
 
-function toggleCollapse(){
-  invPanel.classList.toggle('collapsed');
-}
-
-function toggleMobilePanel(){
-  const isVisible = invPanel.classList.contains('visible');
-  invPanel.classList.toggle('visible', !isVisible);
-  invPanel.classList.remove('collapsed');
-}
-
-invHeader.addEventListener('click', toggleCollapse);
-invToggle.addEventListener('click', (e)=>{ e.stopPropagation(); toggleCollapse(); });
-btnInv.addEventListener('click', toggleMobilePanel);
-
-async function cargarInventario(){
-  try {
-    const r = await fetch('?ajax_inv=1', {cache:'no-store'});
-    const j = await r.json();
-    const tb = document.querySelector('#inv-table tbody');
-
-    if(j.ok && Array.isArray(j.items)){
-      tb.innerHTML = j.items.map(p=>`
-        <tr>
-          <td>
-            <div class="inv-name">${p.nombre}</div>
-            <div class="inv-meta">
-              <span>Stock</span>
-              <span class="inv-pill">${p.cantidad}</span>
-            </div>
-          </td>
-          <td class="inv-actions">
-            <div class="inv-price">$${p.precio}</div>
-            <button class="inv-sell" onclick="venderProd(${p.id})">Vender</button>
-          </td>
-        </tr>
-      `).join('');
-    } else {
-      tb.innerHTML = '<tr><td colspan="2" style="padding:14px;text-align:center;color:#cbd5e1;">Sin productos disponibles</td></tr>';
-    }
-
-  } catch(e) {
-    console.error(e);
-  }
-}
-
-async function venderProd(id){
-
-  
-  const conf = await Swal.fire({
-    title: "¿Confirmar venta?",
-    text: "Se descontará 1 unidad del stock.",
-    icon: "question",
-    showCancelButton: true,
-    confirmButtonText: "Sí, vender",
-    cancelButtonText: "Cancelar"
-  });
-
-  if (!conf.isConfirmed) return; // ❌ si cancela, no vende
-
-  
-  const r = await fetch('', {
-    method:'POST',
-    headers:{'Content-Type':'application/x-www-form-urlencoded'},
-    body:'accion=vender_producto&id='+id
-  });
-
-  const j = await r.json();
-  if(!j.ok){
-    Swal.fire({
-      icon: 'warning',
-      title: 'Sin stock',
-      text: j.msg || 'No hay stock disponible para vender'
-    });
+  // Si no existe el panel (por ejemplo en otras vistas), evitar errores de JS
+  if(!invPanel || !invHeader || !invBody || !invToggle || !btnInv){
     return;
   }
-  
-  cargarInventario();
-  actualizarTurnoBox();
-}
+  function toggleCollapse(){
+    invPanel.classList.toggle('collapsed');
+  }
 
-setInterval(cargarInventario, 5000);
-cargarInventario();
+  function toggleMobilePanel(){
+    const isVisible = invPanel.classList.contains('visible');
+    invPanel.classList.toggle('visible', !isVisible);
+    invPanel.classList.remove('collapsed');
+  }
+
+  invHeader.addEventListener('click', toggleCollapse);
+  invToggle.addEventListener('click', (e)=>{ e.stopPropagation(); toggleCollapse(); });
+  btnInv.addEventListener('click', toggleMobilePanel);
+
+
+async function cargarInventario(){
+    try {
+      const r = await fetch('?ajax_inv=1', {cache:'no-store'});
+      const j = await r.json();
+      const tb = document.querySelector('#inv-table tbody');
+
+      if(j.ok && Array.isArray(j.items)){
+        tb.innerHTML = j.items.map(p=>`
+          <tr>
+            <td>
+              <div class="inv-name">${p.nombre}</div>
+              <div class="inv-meta">
+                <span>Stock</span>
+                <span class="inv-pill">${p.cantidad}</span>
+              </div>
+            </td>
+            <td class="inv-actions">
+              <div class="inv-price">$${p.precio}</div>
+              <button class="inv-sell" onclick="venderProd(${p.id})">Vender</button>
+            </td>
+          </tr>
+        `).join('');
+      } else {
+        tb.innerHTML = '<tr><td colspan="2" style="padding:14px;text-align:center;color:#cbd5e1;">Sin productos disponibles</td></tr>';
+      }
+
+    } catch(e) {
+      console.error(e);
+    }
+  window.venderProd = async function venderProd(id){
+
+     const conf = await Swal.fire({
+      title: "¿Confirmar venta?",
+      text: "Se descontará 1 unidad del stock.",
+      icon: "question",
+      showCancelButton: true,
+      confirmButtonText: "Sí, vender",
+      cancelButtonText: "Cancelar"
+    });
+  
+   if (!conf.isConfirmed) return; // ❌ si cancela, no vende
+
+ 
+    const r = await fetch('', {
+      method:'POST',
+      headers:{'Content-Type':'application/x-www-form-urlencoded'},
+      body:'accion=vender_producto&id='+id
+    });
+   
+    const j = await r.json();
+    if(!j.ok){
+      Swal.fire({
+        icon: 'warning',
+        title: 'Sin stock',
+        text: j.msg || 'No hay stock disponible para vender'
+      });
+      return;
+    }
+
+    cargarInventario();
+    actualizarTurnoBox();
+  }
+  setInterval(cargarInventario, 5000);
+  cargarInventario();
+});
 </script>
 <script>
 document.addEventListener('DOMContentLoaded', ()=>{
