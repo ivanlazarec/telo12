@@ -1609,6 +1609,14 @@ $sql .= " ORDER BY inicio DESC";
 $res = $conn->query($sql);
 $rows = [];
 while($r = $res->fetch_assoc()) { $rows[] = $r; }
+// Preparar reportes con movimientos calculados (una sola vez)
+$reportes = [];
+foreach ($rows as $r) {
+    $reportes[] = [
+        'data' => $r,
+        'movs' => cajaDetalleDesdeHasta($conn, $r['inicio'], $r['fin'] ?? $r['inicio'], 500)
+    ];
+}
 // Calcular total de caja del filtro seleccionado
 // Calcular totales del filtro
 $total_caja = 0;
@@ -1648,6 +1656,48 @@ $promedio_turno = ($cantidad_turnos > 0)
 .btn-small:hover {
   background:#0044cc;
 }
+
+.reportes-table { width:100%; }
+.reportes-table table { width:100%; }
+
+.report-cards { display:none; gap:12px; }
+.report-card {
+  background:#fff;
+  border:1px solid #e5e7eb;
+  border-radius:10px;
+  padding:12px;
+  box-shadow:0 1px 3px rgba(0,0,0,0.08);
+}
+.report-card-header {
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:8px;
+  font-size:14px;
+}
+.report-card-header .label { color:#6b7280; }
+.report-card-header .value { font-weight:600; text-align:right; }
+.report-card-header .full { grid-column:1/-1; }
+.report-card details summary {
+  cursor:pointer;
+  margin-top:10px;
+  font-weight:600;
+  color:#0B5FFF;
+}
+.report-card details[open] summary { margin-bottom:6px; }
+.report-card .mov-table {
+  width:100%;
+  border-collapse:collapse;
+  font-size:13px;
+}
+.report-card .mov-table th,
+.report-card .mov-table td { padding:4px 6px; }
+.report-card .mov-table th { text-align:left; color:#374151; }
+
+@media (max-width: 820px) {
+  .controls { flex-direction:column; align-items:flex-start; }
+  .reportes-table { display:none; }
+  .report-cards { display:flex; flex-direction:column; }
+}
 </style>
 
 <form method="get" class="controls" style="margin-bottom:15px; display:flex;flex-wrap:wrap; gap:10px;">
@@ -1679,6 +1729,7 @@ $promedio_turno = ($cantidad_turnos > 0)
 
 </form>
 
+<div class="reportes-table">
 <table class="table" style="width:100%;border-collapse:collapse;">
   <thead>
     <tr>
@@ -1691,9 +1742,9 @@ $promedio_turno = ($cantidad_turnos > 0)
     </tr>
   </thead>
     <tbody>
-    <?php if(empty($rows)): ?>
+    <?php if(empty($reportes)): ?>
       <tr><td colspan="6" style="padding:10px;text-align:center;color:#777;">Sin turnos cerrados todavía.</td></tr>
-   <?php else: foreach($rows as $r): ?>
+   <?php else: foreach($reportes as $rep): $r=$rep['data']; $movs=$rep['movs']; ?>
   <tr>
     <td><?= fmtFechaArg($r['inicio']) ?></td>
     <td><?= turnoNombre($r['turno']) ?></td>
@@ -1704,7 +1755,6 @@ $promedio_turno = ($cantidad_turnos > 0)
   </tr>
   <tr>
     <td colspan="6" style="background:#f8fafc;">
-      <?php $movs = cajaDetalleDesdeHasta($conn, $r['inicio'], $r['fin'] ?? $r['inicio'], 500); ?>
       <details>
         <summary style="cursor:pointer;font-weight:600;color:#0B5FFF;">Ver movimientos del turno</summary>
         <div style="margin-top:8px;">
@@ -1746,6 +1796,74 @@ $promedio_turno = ($cantidad_turnos > 0)
 
     </tbody>
   </table>
+
+</div>
+
+<div class="report-cards">
+  <?php if(empty($reportes)): ?>
+    <div class="report-card" style="color:#6b7280;">Sin turnos cerrados todavía.</div>
+  <?php else: foreach($reportes as $rep): $r=$rep['data']; $movs=$rep['movs']; ?>
+    <div class="report-card">
+      <div class="report-card-header">
+        <div>
+          <div class="label">Fecha</div>
+          <div class="value"><?= fmtFechaArg($r['inicio']) ?></div>
+        </div>
+        <div>
+          <div class="label">Turno</div>
+          <div class="value"><?= turnoNombre($r['turno']) ?></div>
+        </div>
+        <div>
+          <div class="label">Inicio</div>
+          <div class="value"><?= fmtHoraArg($r['inicio']) ?></div>
+        </div>
+        <div>
+          <div class="label">Fin</div>
+          <div class="value"><?= fmtHoraArg($r['fin']) ?></div>
+        </div>
+        <div class="full">
+          <div class="label">Total</div>
+          <div class="value">$ <?= number_format((int)$r['total'],0,',','.') ?></div>
+        </div>
+        <div class="full" style="color:#6b7280; font-size:13px;">Ocupaciones: <?= (int)$r['ocupaciones'] ?></div>
+      </div>
+
+      <details>
+        <summary>Ver movimientos del turno</summary>
+        <div style="margin-top:6px;">
+          <?php if(empty($movs)): ?>
+            <div style="color:#6b7280;">Sin movimientos registrados.</div>
+          <?php else: ?>
+          <table class="mov-table">
+            <thead>
+              <tr>
+                <th>Origen</th>
+                <th>Hora</th>
+                <th style="text-align:right;">Monto</th>
+              </tr>
+            </thead>
+            <tbody>
+              <?php foreach($movs as $m): ?>
+              <tr>
+                <td>
+                  <?php
+                    if($m['tipo']==='venta')      echo safe($m['hab']);
+                    elseif($m['tipo']==='ajuste') echo '💳 '.safe($m['hab']);
+                    else                          echo 'Hab. '.safe($m['hab']);
+                  ?>
+                </td>
+                <td><?= safe($m['inicio']) ?></td>
+                <td style="text-align:right; color:<?= ($m['monto']<0?'#b91c1c':'#111827') ?>;">$ <?= number_format($m['monto'],0,',','.') ?></td>
+              </tr>
+              <?php endforeach; ?>
+            </tbody>
+          </table>
+          <?php endif; ?>
+        </div>
+      </details>
+    </div>
+  <?php endforeach; endif; ?>
+</div>
 
   <a href="?view=panel" style="display:block;margin-top:10px;color:#0B5FFF;text-decoration:none;">⬅ Volver al panel</a>
 </div>
