@@ -873,6 +873,29 @@ if($accion==='reactivar_extra'){
     $turnoHabitacion = $turnoTag;
     $inicioHabitacion = $startUTC;
 
+if($curOpen){
+        $turnoAbierto = $curOpen['turno'] ?? '';
+        $esNocheAbierta = in_array($turnoAbierto, ['noche','noche-finde','noche-find'], true);
+
+        if($esNocheAbierta){
+            $endUTC = $startUTC;
+            $startArgTs = toArgTs($curOpen['hora_inicio'] ?? null);
+            $endArgTs   = toArgTs($endUTC);
+            $mins = ($startArgTs!==null && $endArgTs!==null)
+              ? max(0, intval(round(($endArgTs - $startArgTs) / 60)))
+              : 0;
+
+            $close = $conn->prepare("UPDATE historial_habitaciones SET hora_fin=?, duracion_minutos=? WHERE id=?");
+            $close->bind_param('sii',$endUTC,$mins,$curOpen['id']);
+            $close->execute();
+            $close->close();
+
+            $turnoHabitacion = $turnoTag;
+            $inicioHabitacion = $startUTC;
+            $curOpen = null; // crea un nuevo bloque extra con turno standard
+        }
+    }
+
     if($curOpen){
         $turnoHabitacion = $curOpen['turno'] ?? $turnoTag;
         $inicioHabitacion = $curOpen['hora_inicio'] ?? $startUTC;
@@ -887,7 +910,7 @@ if($accion==='reactivar_extra'){
         $estado='ocupada';
         $ins=$conn->prepare("INSERT INTO historial_habitaciones (habitacion,tipo,estado,turno,hora_inicio,fecha_registro,precio_aplicado,es_extra,bloques)
                          VALUES (?,?,?,?,?,?,?,1,1)");
-    $ins->bind_param('isssssi',$id,$tipoHab,$estado,$turnoTag,$startUTC,$fecha,$precio);
+        $ins->bind_param('isssssi',$id,$tipoHab,$estado,$turnoTag,$startUTC,$fecha,$precio);
         $ins->execute();
         $ins->close();
     }
