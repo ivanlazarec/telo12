@@ -178,6 +178,17 @@ CREATE TABLE IF NOT EXISTS historial_turnos (
   ocupaciones INT NOT NULL DEFAULT 0
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 ");
+
+/* ====== Marcadores de cobro de movimientos ====== */
+$conn->query("
+CREATE TABLE IF NOT EXISTS cobros_movimientos (
+  id INT NOT NULL,
+  tipo VARCHAR(10) NOT NULL, -- hab | venta
+  cobrado TINYINT(1) NOT NULL DEFAULT 0,
+  PRIMARY KEY (id, tipo)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+");
+
 /* ====== Pedidos de minibar ====== */
 $conn->query("
 CREATE TABLE IF NOT EXISTS minibar_pedidos (
@@ -456,26 +467,30 @@ function cajaDetalleDesdeHasta($conn,$inicioUTC,$finUTC=null,$limit=150){
     $col = 'utf8mb4_unicode_ci';
   $sql = "
     (SELECT
-        id,
-        habitacion,
-        CONVERT(turno USING utf8mb4) COLLATE $col AS turno,
-        hora_inicio,
-        precio_aplicado AS monto,
+        h.id,
+        h.habitacion,
+        CONVERT(h.turno USING utf8mb4) COLLATE $col AS turno,
+        h.hora_inicio,
+        h.precio_aplicado AS monto,
         'hab' COLLATE $col AS tipo,
-        NULL AS nombre
-     FROM historial_habitaciones
-     WHERE hora_inicio >= ? AND codigo IS NULL".($finUTC?" AND hora_inicio < ?":"").")
+        NULL AS nombre,
+        COALESCE(cm.cobrado, 0) AS cobrado
+     FROM historial_habitaciones h
+     LEFT JOIN cobros_movimientos cm ON cm.id = h.id AND cm.tipo = 'hab'
+     WHERE h.hora_inicio >= ? AND h.codigo IS NULL".($finUTC?" AND h.hora_inicio < ?":"").")
     UNION ALL
     (SELECT
-        id,
+        v.id,
         NULL AS habitacion,
-        CONVERT(turno USING utf8mb4) COLLATE $col AS turno,
-        hora AS hora_inicio,
-        precio AS monto,
+        CONVERT(v.turno USING utf8mb4) COLLATE $col AS turno,
+        v.hora AS hora_inicio,
+        v.precio AS monto,
         'venta' COLLATE $col AS tipo,
-        CONVERT(nombre USING utf8mb4) COLLATE $col AS nombre
-     FROM ventas_turno
-     WHERE hora >= ?".($finUTC?" AND hora < ?":"").")
+         CONVERT(v.nombre USING utf8mb4) COLLATE $col AS nombre,
+        COALESCE(cm.cobrado, 0) AS cobrado
+     FROM ventas_turno v
+     LEFT JOIN cobros_movimientos cm ON cm.id = v.id AND cm.tipo = 'venta'
+     WHERE v.hora >= ?".($finUTC?" AND v.hora < ?":"").")
      UNION ALL
     (SELECT
         id,
@@ -484,7 +499,8 @@ function cajaDetalleDesdeHasta($conn,$inicioUTC,$finUTC=null,$limit=150){
         created_at AS hora_inicio,
         (monto * -1) AS monto,
         'ajuste' COLLATE $col AS tipo,
-        'Pago online' COLLATE $col AS nombre
+        'Pago online' COLLATE $col AS nombre,
+        1 AS cobrado
      FROM pagos_online_habitaciones
      WHERE created_at >= ?".($finUTC?" AND created_at < ?":"").")
     ORDER BY hora_inicio ASC
@@ -513,6 +529,7 @@ function cajaDetalleDesdeHasta($conn,$inicioUTC,$finUTC=null,$limit=150){
       'turno' => $r['turno'],
       'inicio'=> fmtHoraArg($r['hora_inicio']),
       'monto' => (int)($r['monto']??0),
+      'cobrado' => (int)($r['cobrado'] ?? 0),
     ];
   }
   $st->close();
@@ -578,6 +595,45 @@ if($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion'])){
     $stmt->close();
 
     echo json_encode(['ok'=>1]);
+    exit;
+  }
+  /* ===== MARCAR/Desmarcar cobrado ===== */
+  if ($accion === 'toggle_cobrado') {
+    $id   = intval($_POST['id'] ?? 0);
+    $tipo = $_POST['tipo'] ?? '';
+
+    if ($id <= 0 || !in_array($tipo, ['hab','venta'], true)) {
+      echo json_encode(['ok'=>0,'error'=>'Datos inválidos']);
+      exit;
+    }
+
+    $tabla = $tipo === 'hab' ? 'historial_habitaciones' : 'ventas_turno';
+
+    $chk = $conn->prepare("SELECT COUNT(*) c FROM $tabla WHERE id=?");
+    $chk->bind_param('i', $id);
+    $chk->execute();
+    $exists = (int)($chk->get_result()->fetch_assoc()['c'] ?? 0);
+    $chk->close();
+
+    if ($exists === 0) {
+      echo json_encode(['ok'=>0,'error'=>'Movimiento inexistente']);
+      exit;
+    }
+
+    $sel = $conn->prepare("SELECT cobrado FROM cobros_movimientos WHERE id=? AND tipo=? LIMIT 1");
+    $sel->bind_param('is', $id, $tipo);
+    $sel->execute();
+    $cur = $sel->get_result()->fetch_assoc();
+    $sel->close();
+
+    $nuevo = ($cur['cobrado'] ?? 0) ? 0 : 1;
+
+    $up = $conn->prepare("REPLACE INTO cobros_movimientos (id,tipo,cobrado) VALUES (?,?,?)");
+    $up->bind_param('isi', $id, $tipo, $nuevo);
+    $up->execute();
+    $up->close();
+
+    echo json_encode(['ok'=>1,'cobrado'=>$nuevo]);
     exit;
   }
 if ($accion === 'ack_minibar') {
@@ -2018,24 +2074,58 @@ async function actualizarTurnoBox(){
 
       const body=document.getElementById('tb-mov-body');
     if(j.detalle && j.detalle.length){
-      body.innerHTML=j.detalle.map(m=>`
-        <tr>
-          <td style="padding:4px 6px;">${m.hab}</td>
-          <td style="padding:4px 6px;">${m.inicio}</td>
-          <td style="padding:4px 6px; text-align:right; ${m.monto<0?'color:#b91c1c;':'color:#111827;'}">${m.monto}</td>
-          <td style="padding:4px 6px; text-align:center;">
-            ${m.tipo==='ajuste' ? '' : `
-              <button
-                class="btn-del-mov"
-                data-id="${m.id}"
-                data-tipo="${m.tipo}"
-                style="border:none;background:none;font-size:16px;cursor:pointer;">
-                🗑
-              </button>
-            `}
-          </td>
-        </tr>
-      `).join('');
+     body.innerHTML=j.detalle.map(m=>{
+        const toggleable = m.tipo !== 'ajuste';
+        const bg = toggleable ? (m.cobrado ? '#dcfce7' : '#fee2e2') : '#f3f4f6';
+        const cursor = toggleable ? 'pointer' : 'default';
+        const cobradoTxt = toggleable ? (m.cobrado ? 'Cobrado' : 'Pendiente') : '';
+        return `
+          <tr
+            data-id="${m.id}"
+            data-tipo="${m.tipo}"
+            data-toggle="${toggleable?1:0}"
+            data-cobrado="${m.cobrado||0}"
+            style="background:${bg}; cursor:${cursor};">
+            <td style="padding:4px 6px;">${m.hab}</td>
+            <td style="padding:4px 6px;">${m.inicio}</td>
+            <td style="padding:4px 6px; text-align:right; ${m.monto<0?'color:#b91c1c;':'color:#111827;'}">${m.monto}</td>
+            <td style="padding:4px 6px; text-align:center;">
+              ${toggleable ? `<span style="font-size:10px;color:#374151;display:block;">${cobradoTxt}</span>` : ''}
+              ${m.tipo==='ajuste' ? '' : `
+                <button
+                  class="btn-del-mov"
+                  data-id="${m.id}"
+                  data-tipo="${m.tipo}"
+                  style="border:none;background:none;font-size:16px;cursor:pointer;">
+                  🗑
+                </button>
+              `}
+            </td>
+          </tr>
+        `;
+      }).join('');
+
+      body.querySelectorAll('tr[data-toggle="1"]').forEach(row=>{
+        row.addEventListener('click', async (ev)=>{
+          if(ev.target.closest('.btn-del-mov')) return;
+          const id=row.dataset.id;
+          const tipo=row.dataset.tipo;
+          try{
+            const res=await fetch('',{
+              method:'POST',
+              headers:{'Content-Type':'application/x-www-form-urlencoded'},
+              body:new URLSearchParams({accion:'toggle_cobrado',id,tipo})
+            });
+            const j=await res.json();
+            if(j.ok){
+              row.dataset.cobrado = j.cobrado ? '1':'0';
+              row.style.background = j.cobrado ? '#dcfce7' : '#fee2e2';
+              const badge=row.querySelector('span');
+              if(badge) badge.textContent = j.cobrado ? 'Cobrado' : 'Pendiente';
+            }
+          }catch(err){ console.error(err); }
+        });
+      });
     }else{
       body.innerHTML='<tr><td colspan="4" style="text-align:center; color:#9ca3af; padding:8px;">Sin movimientos</td></tr>';
     }
