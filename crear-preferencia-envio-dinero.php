@@ -42,9 +42,9 @@ $preference->metadata = [
     'monto' => $monto
 ];
 $preference->back_urls = [
-    'success' => 'https://lamoradatandil.com/gracias.php',
-    'pending' => 'https://lamoradatandil.com/gracias.php',
-    'failure' => 'https://lamoradatandil.com/gracias.php'
+    'success' => 'https://lamoradatandil.com/gracias-envio-dinero.php',
+    'pending' => 'https://lamoradatandil.com/gracias-envio-dinero.php',
+    'failure' => 'https://lamoradatandil.com/gracias-envio-dinero.php'
 ];
 $preference->auto_return = 'approved';
 $preference->notification_url = 'https://lamoradatandil.com/mp-webhook.php';
