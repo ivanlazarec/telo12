@@ -106,6 +106,22 @@ if ($_SERVER['REQUEST_METHOD']==='GET' && isset($_GET['ajax_pagos_online'])) {
   echo json_encode(['ok'=>1,'pagos'=>$rows]);
   exit;
 }
+/* ================= Mensajes internos (fetch) ================= */
+if ($_SERVER['REQUEST_METHOD']==='GET' && isset($_GET['ajax_mensajes'])) {
+  $res = $conn->query("SELECT id, nombre, mensaje, created_at FROM mensajes_internos WHERE estado='pendiente' ORDER BY created_at ASC");
+  $items = [];
+  while($r = $res->fetch_assoc()){
+    $items[] = [
+      'id' => (int)$r['id'],
+      'nombre' => $r['nombre'] ?? '',
+      'mensaje' => $r['mensaje'] ?? '',
+      'hora' => fmtHoraArg($r['created_at'] ?? ''),
+      'created_at' => $r['created_at'] ?? ''
+    ];
+  }
+  echo json_encode(['ok'=>1,'mensajes'=>$items]);
+  exit;
+}
 
 
 /*===================== Tablas mínimas ==================*/
@@ -219,6 +235,20 @@ CREATE TABLE IF NOT EXISTS pagos_online_habitaciones (
   avisado TINYINT(1) NOT NULL DEFAULT 0,
   INDEX (habitacion),
   INDEX (avisado)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+");
+
+/* ====== Mensajes internos ====== */
+$conn->query("
+CREATE TABLE IF NOT EXISTS mensajes_internos (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  nombre VARCHAR(100) NOT NULL,
+  mensaje TEXT NOT NULL,
+  estado ENUM('pendiente','leido') NOT NULL DEFAULT 'pendiente',
+  created_at DATETIME NOT NULL,
+  updated_at DATETIME NULL,
+  INDEX (estado),
+  INDEX (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 ");
 
@@ -564,6 +594,55 @@ if($_SERVER['REQUEST_METHOD']==='POST'){ ini_set('display_errors', 0); } // evit
 
 if($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion'])){
   $accion = $_POST['accion'];
+  
+  /* ===== Mensajes internos ===== */
+  if ($accion === 'crear_mensaje') {
+    $nombre = trim($_POST['nombre'] ?? '');
+    $mensaje = trim($_POST['mensaje'] ?? '');
+
+    if ($mensaje === '') {
+      echo json_encode(['ok'=>0, 'error'=>'Ingresá un mensaje']);
+      exit;
+    }
+
+    if ($nombre === '') { $nombre = 'Anónimo'; }
+    $ahora = nowUTCStrFromArg();
+
+    $st = $conn->prepare("INSERT INTO mensajes_internos (nombre, mensaje, estado, created_at) VALUES (?,?, 'pendiente', ?)");
+    $st->bind_param('sss', $nombre, $mensaje, $ahora);
+    $st->execute();
+    $newId = $st->insert_id;
+    $st->close();
+
+    echo json_encode([
+      'ok'=>1,
+      'mensaje'=>[
+        'id'=>(int)$newId,
+        'nombre'=>$nombre,
+        'mensaje'=>$mensaje,
+        'hora'=>fmtHoraArg($ahora)
+      ]
+    ]);
+    exit;
+  }
+
+  if ($accion === 'ack_mensaje') {
+    $id = intval($_POST['id'] ?? 0);
+    if ($id <= 0) {
+      echo json_encode(['ok'=>0, 'error'=>'ID inválido']);
+      exit;
+    }
+
+    $ahora = nowUTCStrFromArg();
+    $st = $conn->prepare("UPDATE mensajes_internos SET estado='leido', updated_at=? WHERE id=?");
+    $st->bind_param('si', $ahora, $id);
+    $st->execute();
+    $ok = $st->affected_rows > 0;
+    $st->close();
+
+    echo json_encode(['ok'=>$ok ? 1 : 0]);
+    exit;
+  }
   
   /* ===== BORRAR MOVIMIENTO (habitaciones o ventas) ===== */
   if ($accion === 'borrar_mov') {
@@ -1330,6 +1409,135 @@ html, body { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grays
     top: -60px !important; /* antes estaba -28px */
   }
 }
+/* ===== Mensajes internos ===== */
+.mensajes-wrapper{
+  position:fixed;
+  left:50%;
+  bottom:18px;
+  transform:translateX(-50%);
+  z-index:30;
+  width:min(500px, calc(100% - 28px));
+  max-width:100%;
+}
+.mensajes-toggle{
+  width:100%;
+  border:none;
+  background:#0b5fff;
+  color:#fff;
+  border-radius:14px;
+  padding:10px 14px;
+  font-weight:800;
+  box-shadow:0 10px 20px rgba(11,95,255,0.25);
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  gap:10px;
+  cursor:pointer;
+}
+.mensajes-toggle.alerta{
+  background:#dc2626;
+  box-shadow:0 12px 26px rgba(220,38,38,0.35);
+}
+.mensajes-toggle span{
+  background:rgba(255,255,255,0.15);
+  padding:4px 8px;
+  border-radius:999px;
+  font-size:12px;
+}
+.mensajes-panel{
+  margin-top:8px;
+  background:#fff;
+  border:1px solid var(--border);
+  border-radius:16px;
+  box-shadow:0 12px 28px rgba(15,23,42,0.25);
+  overflow:hidden;
+  display:flex;
+  flex-direction:column;
+}
+.mensajes-panel.collapsed .mensajes-body,
+.mensajes-panel.collapsed .mensajes-form{
+  display:none;
+}
+.mensajes-header{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:8px;
+  padding:12px 14px;
+  background:#0b5fff;
+  color:#fff;
+}
+.mensajes-header h3{margin:0;font-size:15px;}
+.mensajes-actions{display:flex;gap:8px;align-items:center;}
+.mensajes-actions button{
+  border:none;
+  background:rgba(255,255,255,0.15);
+  color:#fff;
+  padding:6px 10px;
+  border-radius:10px;
+  cursor:pointer;
+}
+.mensajes-body{
+  max-height:260px;
+  overflow-y:auto;
+  padding:10px 12px;
+  display:flex;
+  flex-direction:column;
+  gap:10px;
+  background:#f8fafc;
+}
+.mensaje-item{
+  background:#fff;
+  border:1px solid #e2e8f0;
+  border-radius:12px;
+  padding:10px 12px;
+  box-shadow:0 2px 6px rgba(0,0,0,0.05);
+}
+.mensaje-top{display:flex;justify-content:space-between;align-items:center;gap:6px; font-weight:700; font-size:13px;}
+.mensaje-text{margin:6px 0 8px 0; font-size:14px; line-height:1.4;}
+.mensaje-acciones{display:flex;justify-content:flex-end;}
+.mensaje-acciones button{
+  background:#16a34a;
+  color:#fff;
+  border:none;
+  border-radius:10px;
+  padding:6px 10px;
+  cursor:pointer;
+  font-weight:700;
+}
+.mensajes-form{
+  border-top:1px solid #e2e8f0;
+  padding:12px;
+  display:grid;
+  grid-template-columns:1fr auto;
+  gap:8px;
+  align-items:center;
+}
+.mensajes-form input,
+.mensajes-form textarea{
+  width:100%;
+  border:1px solid #e2e8f0;
+  border-radius:10px;
+  padding:8px 10px;
+  font-size:14px;
+}
+.mensajes-form textarea{grid-column:1/3; min-height:70px; resize:vertical;}
+.mensajes-form button{
+  background:#0b5fff;
+  color:#fff;
+  border:none;
+  border-radius:10px;
+  padding:10px 14px;
+  font-weight:800;
+  cursor:pointer;
+}
+@media(max-width:900px){
+  .mensajes-wrapper{ width:calc(100% - 20px); bottom:80px; }
+  .mensajes-body{ max-height:220px; }
+  .mensajes-form{ grid-template-columns:1fr; }
+  .mensajes-form textarea{ grid-column:1/2; }
+}
+
 /* ===== Caja / Turnos (abajo a la derecha) ===== */
 .turno-box {
   position: fixed;
@@ -1983,6 +2191,28 @@ $promedio_turno = ($cantidad_turnos > 0)
 
   <!-- Grid móvil (2 columnas, orden especial) -->
   <div id="mobile-grid" class="mobile-grid"></div>
+  <!-- Mensajes internos -->
+  <div class="mensajes-wrapper" id="mensajes-wrapper">
+    <button class="mensajes-toggle" id="mensajes-toggle">💬 Mensajes <span id="mensajes-count">0</span></button>
+    <div class="mensajes-panel collapsed" id="mensajes-panel">
+      <div class="mensajes-header">
+        <h3>Mensajes internos</h3>
+        <div class="mensajes-actions">
+          <button type="button" id="mensajes-refresh">Actualizar</button>
+          <button type="button" id="mensajes-colapsar">Minimizar</button>
+        </div>
+      </div>
+      <div class="mensajes-body" id="mensajes-body">
+        <div style="text-align:center;color:#64748B;font-weight:600;">Cargando mensajes...</div>
+      </div>
+      <form class="mensajes-form" id="mensajes-form">
+        <input type="text" id="msg-nombre" name="nombre" placeholder="Tu nombre o sector" autocomplete="name">
+        <button type="submit" aria-label="Enviar mensaje">Enviar mensaje</button>
+        <textarea id="msg-texto" name="mensaje" placeholder="Escribí el mensaje" required></textarea>
+      </form>
+    </div>
+  </div>
+  
   <!-- Caja de turnos revisada (discreta y funcional) -->
 <div id="turno-mini-btn" 
      style="position:fixed; right:16px; bottom:16px; z-index:6; background:#e5e7eb; color:#111; border:1px solid #ccc; border-radius:50%; width:42px; height:42px; display:flex; align-items:center; justify-content:center; cursor:pointer; font-size:18px; font-weight:bold;">
@@ -2021,7 +2251,121 @@ $promedio_turno = ($cantidad_turnos > 0)
     </table>
   </div>
 </div>
+<script>
+const escapeHTML = (str='') => str
+  .replace(/&/g,'&amp;')
+  .replace(/</g,'&lt;')
+  .replace(/>/g,'&gt;')
+  .replace(/"/g,'&quot;')
+  .replace(/'/g,'&#039;');
 
+const msgPanel = document.getElementById('mensajes-panel');
+const msgBody = document.getElementById('mensajes-body');
+const msgToggle = document.getElementById('mensajes-toggle');
+const msgRefresh = document.getElementById('mensajes-refresh');
+const msgCollapse = document.getElementById('mensajes-colapsar');
+const msgCount = document.getElementById('mensajes-count');
+const msgForm = document.getElementById('mensajes-form');
+const msgNombre = document.getElementById('msg-nombre');
+const msgTexto = document.getElementById('msg-texto');
+let mensajesTimer = null;
+
+function setMensajesCollapsed(collapsed){
+  msgPanel.classList.toggle('collapsed', collapsed);
+}
+
+function renderMensajes(list){
+  const hay = Array.isArray(list) && list.length > 0;
+  msgCount.textContent = list.length;
+  msgToggle.classList.toggle('alerta', hay);
+
+  if(!hay){
+    msgBody.innerHTML = '<div style="text-align:center;color:#64748B;font-weight:600;">No hay mensajes pendientes</div>';
+    return;
+  }
+
+  msgBody.innerHTML = '';
+  list.forEach(m => {
+    const item = document.createElement('div');
+    item.className = 'mensaje-item';
+    item.innerHTML = `
+      <div class="mensaje-top">
+        <span>${escapeHTML(m.nombre || 'Anon')}</span>
+        <span style="color:#0b5fff;font-size:12px;">${escapeHTML(m.hora || '')}</span>
+      </div>
+      <div class="mensaje-text">${escapeHTML(m.mensaje || '')}</div>
+      <div class="mensaje-acciones">
+        <button type="button" data-id="${m.id}">Marcar leído</button>
+      </div>
+    `;
+    msgBody.appendChild(item);
+  });
+}
+
+async function actualizarMensajes(){
+  try{
+    const r = await fetch('?ajax_mensajes=1', {cache:'no-store'});
+    const j = await r.json();
+    if(j.ok){ renderMensajes(j.mensajes || []); }
+  }catch(err){ console.error(err); }
+}
+
+async function marcarLeido(id){
+  if(!id) return;
+  try{
+    await fetch('',{
+      method:'POST',
+      headers:{'Content-Type':'application/x-www-form-urlencoded'},
+      body:new URLSearchParams({accion:'ack_mensaje',id})
+    });
+    actualizarMensajes();
+  }catch(err){ console.error(err); }
+}
+
+msgToggle.addEventListener('click', ()=>{
+  const col = msgPanel.classList.contains('collapsed');
+  setMensajesCollapsed(!col);
+});
+msgCollapse.addEventListener('click', ()=> setMensajesCollapsed(true));
+msgRefresh.addEventListener('click', actualizarMensajes);
+
+msgBody.addEventListener('click', (ev)=>{
+  const btn = ev.target.closest('button[data-id]');
+  if(!btn) return;
+  const id = btn.dataset.id;
+  btn.disabled = true;
+  marcarLeido(id).finally(()=>{ btn.disabled=false; });
+});
+
+msgForm.addEventListener('submit', async (ev)=>{
+  ev.preventDefault();
+  const nombre = msgNombre.value.trim();
+  const mensaje = msgTexto.value.trim();
+  if(!mensaje){
+    Swal.fire({icon:'warning',title:'Escribí un mensaje'});
+    return;
+  }
+
+  try{
+    const r = await fetch('',{
+      method:'POST',
+      headers:{'Content-Type':'application/x-www-form-urlencoded'},
+      body:new URLSearchParams({accion:'crear_mensaje', nombre, mensaje})
+    });
+    const j = await r.json();
+    if(j.ok){
+      msgTexto.value='';
+      setMensajesCollapsed(false);
+      actualizarMensajes();
+    } else {
+      Swal.fire({icon:'error',title:'No se pudo guardar', text:j.error||'Reintentá'});
+    }
+  }catch(err){ console.error(err); }
+});
+
+mensajesTimer = setInterval(actualizarMensajes, 5000);
+actualizarMensajes();
+</script>
 <script>
 // Mostrar / ocultar caja
 document.getElementById('turno-mini-btn').addEventListener('click', ()=>{
