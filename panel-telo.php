@@ -1532,7 +1532,36 @@ html, body { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grays
   cursor:pointer;
 }
 @media(max-width:900px){
-  .mensajes-wrapper{ width:calc(100% - 20px); bottom:80px; }
+  .mensajes-wrapper{
+    left:12px;
+    right:auto;
+    bottom:80px;
+    transform:none;
+    width:auto;
+    max-width:calc(100% - 24px);
+  }
+  .mensajes-toggle{
+    width:48px;
+    height:48px;
+    padding:0;
+    border-radius:999px;
+    font-size:0;
+    position:relative;
+    justify-content:center;
+  }
+  .mensajes-toggle::before{
+    content:"💬";
+    font-size:22px;
+  }
+  .mensajes-toggle span{
+    position:absolute;
+    top:-6px;
+    right:-6px;
+    font-size:12px;
+  }
+  .mensajes-panel{
+    width:min(320px, calc(100vw - 24px));
+  }
   .mensajes-body{ max-height:220px; }
   .mensajes-form{ grid-template-columns:1fr; }
   .mensajes-form textarea{ grid-column:1/2; }
