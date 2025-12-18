@@ -1540,6 +1540,21 @@ html, body { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grays
     width:auto;
     max-width:calc(100% - 24px);
   }
+  .mensajes-wrapper.expanded{
+    background:#fff;
+    border:1px solid var(--border);
+    border-radius:16px;
+    box-shadow:0 12px 28px rgba(15,23,42,0.25);
+    padding:8px;
+  }
+  .mensajes-wrapper.expanded .mensajes-toggle{
+    display:none;
+  }
+  .mensajes-wrapper.expanded .mensajes-panel{
+    margin-top:0;
+    border:0;
+    box-shadow:none;
+  }
   .mensajes-toggle{
     width:48px;
     height:48px;
@@ -2291,6 +2306,7 @@ const escapeHTML = (str='') => str
 const msgPanel = document.getElementById('mensajes-panel');
 const msgBody = document.getElementById('mensajes-body');
 const msgToggle = document.getElementById('mensajes-toggle');
+const msgWrapper = document.getElementById('mensajes-wrapper');
 const msgRefresh = document.getElementById('mensajes-refresh');
 const msgCollapse = document.getElementById('mensajes-colapsar');
 const msgCount = document.getElementById('mensajes-count');
@@ -2301,6 +2317,9 @@ let mensajesTimer = null;
 
 function setMensajesCollapsed(collapsed){
   msgPanel.classList.toggle('collapsed', collapsed);
+  if (msgWrapper) {
+    msgWrapper.classList.toggle('expanded', !collapsed);
+  }
 }
 
 function renderMensajes(list){
