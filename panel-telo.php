@@ -231,12 +231,23 @@ CREATE TABLE IF NOT EXISTS pagos_online_habitaciones (
   turno VARCHAR(30) NOT NULL,
   bloques INT NOT NULL DEFAULT 1,
   monto INT NOT NULL DEFAULT 0,
+  payment_id VARCHAR(80) NULL,
   created_at DATETIME NOT NULL,
   avisado TINYINT(1) NOT NULL DEFAULT 0,
   INDEX (habitacion),
-  INDEX (avisado)
+  INDEX (avisado),
+  UNIQUE KEY unique_payment_id (payment_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 ");
+$col = $conn->query("SHOW COLUMNS FROM pagos_online_habitaciones LIKE 'payment_id'");
+if ($col && $col->num_rows === 0) {
+  $conn->query("ALTER TABLE pagos_online_habitaciones ADD COLUMN payment_id VARCHAR(80) NULL");
+}
+$idx = $conn->query("SHOW INDEX FROM pagos_online_habitaciones WHERE Key_name='unique_payment_id'");
+if ($idx && $idx->num_rows === 0) {
+  $conn->query("ALTER TABLE pagos_online_habitaciones ADD UNIQUE KEY unique_payment_id (payment_id)");
+}
+
 
 /* ====== Mensajes internos ====== */
 $conn->query("
@@ -1576,6 +1587,9 @@ html, body { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grays
   }
   .mensajes-panel{
     width:min(320px, calc(100vw - 24px));
+  }
+  .mensajes-panel.collapsed{
+    display:none;
   }
   .mensajes-body{ max-height:220px; }
   .mensajes-form{ grid-template-columns:1fr; }

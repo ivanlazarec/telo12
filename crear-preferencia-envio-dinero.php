@@ -30,6 +30,17 @@ if ($monto <= 0) {
     exit;
 }
 
+$stmt = $conn->prepare("SELECT estado FROM habitaciones WHERE id=? LIMIT 1");
+$stmt->bind_param('i', $habitacion);
+$stmt->execute();
+$room = $stmt->get_result()->fetch_assoc();
+$stmt->close();
+
+if (!$room || ($room['estado'] ?? '') !== 'ocupada') {
+    echo json_encode(['error' => 'La habitación no está ocupada']);
+    exit;
+}
+
 $preference = new MercadoPago\Preference();
 $item = new MercadoPago\Item();
 $item->title = "Envío digital para Hab. #$habitacion";

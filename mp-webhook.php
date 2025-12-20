@@ -31,10 +31,14 @@ function ensurePagosOnlineHabitaciones(mysqli $conn): void {
       turno VARCHAR(30) NOT NULL,
       bloques INT NOT NULL DEFAULT 1,
       monto INT NOT NULL DEFAULT 0,
+      payment_id VARCHAR(80) NULL,
       created_at DATETIME NOT NULL,
       avisado TINYINT(1) NOT NULL DEFAULT 0,
-      INDEX(habitacion), INDEX(avisado)
+      INDEX(habitacion), INDEX(avisado),
+      UNIQUE KEY unique_payment_id (payment_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
+    @$conn->query("ALTER TABLE pagos_online_habitaciones ADD COLUMN payment_id VARCHAR(80) NULL");
+    @$conn->query("ALTER TABLE pagos_online_habitaciones ADD UNIQUE KEY unique_payment_id (payment_id)");
 }
 
 function ensurePagosMp(mysqli $conn): void {
@@ -193,10 +197,22 @@ if ($kind === 'envio_dinero') {
     $conn = db();
     ensurePagosOnlineHabitaciones($conn);
     
+    $roomStmt = $conn->prepare("SELECT estado FROM habitaciones WHERE id=? LIMIT 1");
+    $roomStmt->bind_param('i', $habitacion);
+    $roomStmt->execute();
+    $room = $roomStmt->get_result()->fetch_assoc();
+    $roomStmt->close();
+
+    if (($room['estado'] ?? '') !== 'ocupada') {
+        http_response_code(200);
+        exit;
+    }
+
     $turnoTxt = 'envio-dinero';
     $bloques  = 0;
-    $ins = $conn->prepare("INSERT INTO pagos_online_habitaciones (habitacion, turno, bloques, monto, created_at) VALUES (?,?,?,?,NOW())");
-    $ins->bind_param('isii', $habitacion, $turnoTxt, $bloques, $monto);
+    $pidStr = strval($payment_id);
+    $ins = $conn->prepare("INSERT IGNORE INTO pagos_online_habitaciones (habitacion, turno, bloques, monto, payment_id, created_at) VALUES (?,?,?,?,?,NOW())");
+    $ins->bind_param('isiis', $habitacion, $turnoTxt, $bloques, $monto, $pidStr);
     $ins->execute();
     $ins->close();
 
@@ -221,9 +237,11 @@ if ($kind === 'turno_online') {
       turno VARCHAR(30) NOT NULL,
       bloques INT NOT NULL DEFAULT 1,
       monto INT NOT NULL DEFAULT 0,
+      payment_id VARCHAR(80) NULL,
       created_at DATETIME NOT NULL,
       avisado TINYINT(1) NOT NULL DEFAULT 0,
-      INDEX(habitacion), INDEX(avisado)
+      INDEX(habitacion), INDEX(avisado),
+      UNIQUE KEY unique_payment_id (payment_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
 
     $hist = $conn->prepare("SELECT id, bloques, precio_aplicado FROM historial_habitaciones WHERE habitacion=? AND hora_fin IS NULL ORDER BY id DESC LIMIT 1");
@@ -245,8 +263,9 @@ if ($kind === 'turno_online') {
         $upd->close();
     }
 
-    $ins = $conn->prepare("INSERT INTO pagos_online_habitaciones (habitacion, turno, bloques, monto, created_at) VALUES (?,?,?,?,NOW())");
-    $ins->bind_param('isii', $habitacion, $turno, $pagados, $monto);
+    $pidStr = strval($payment_id);
+    $ins = $conn->prepare("INSERT IGNORE INTO pagos_online_habitaciones (habitacion, turno, bloques, monto, payment_id, created_at) VALUES (?,?,?,?,?,NOW())");
+    $ins->bind_param('isiis', $habitacion, $turno, $pagados, $monto, $pidStr);
     $ins->execute();
     $ins->close();
 
