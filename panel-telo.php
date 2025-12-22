@@ -1,5 +1,5 @@
 <?php
-// panel-telo.php — Panel + Registros + Precios + mejoras de layout y alertas
+// panel-nuevo.php — Panel limpio + precios + reportes + inventario + mensajes
 error_reporting(E_ALL);
 ini_set('display_errors', 1);
 header('Content-Type: text/html; charset=utf-8');
@@ -75,37 +75,6 @@ if($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion']) && $_POST['acc
 }
 
 /* ================= AJAX alertas de minibar ================= */
-if ($_SERVER['REQUEST_METHOD']==='GET' && isset($_GET['ajax_minibar_alerts'])) {
-  $res = $conn->query("SELECT id, habitacion, items, total, paid_at FROM minibar_pedidos WHERE estado='pagado' AND avisado=0 ORDER BY COALESCE(paid_at, created_at) ASC");
-  $pedidos = [];
-  while($r = $res->fetch_assoc()){
-    $items = json_decode($r['items'] ?? '[]', true);
-    $pedidos[] = [
-      'id' => (int)$r['id'],
-      'habitacion' => (int)$r['habitacion'],
-      'total' => (int)$r['total'],
-      'items' => is_array($items) ? $items : []
-    ];
-  }
-  echo json_encode(['ok'=>1,'pedidos'=>$pedidos]);
-  exit;
-}
-/* ================= AJAX alertas de pagos online ================= */
-if ($_SERVER['REQUEST_METHOD']==='GET' && isset($_GET['ajax_pagos_online'])) {
-  $res = $conn->query("SELECT id, habitacion, turno, bloques, monto, created_at FROM pagos_online_habitaciones WHERE avisado=0 ORDER BY created_at ASC");
-  $rows = [];
-  while($r = $res->fetch_assoc()){
-    $rows[] = [
-      'id' => (int)$r['id'],
-      'habitacion' => (int)$r['habitacion'],
-      'turno' => $r['turno'] ?? '',
-      'bloques' => (int)($r['bloques'] ?? 1),
-      'monto' => (int)($r['monto'] ?? 0)
-    ];
-  }
-  echo json_encode(['ok'=>1,'pagos'=>$rows]);
-  exit;
-}
 /* ================= Mensajes internos (fetch) ================= */
 if ($_SERVER['REQUEST_METHOD']==='GET' && isset($_GET['ajax_mensajes'])) {
   $res = $conn->query("SELECT id, nombre, mensaje, created_at FROM mensajes_internos WHERE estado='pendiente' ORDER BY created_at ASC");
@@ -206,47 +175,7 @@ CREATE TABLE IF NOT EXISTS cobros_movimientos (
 ");
 
 /* ====== Pedidos de minibar ====== */
-$conn->query("
-CREATE TABLE IF NOT EXISTS minibar_pedidos (
-  id INT AUTO_INCREMENT PRIMARY KEY,
-  habitacion INT NOT NULL,
-  items JSON NOT NULL,
-  total INT NOT NULL DEFAULT 0,
-  estado VARCHAR(20) NOT NULL DEFAULT 'pendiente',
-  preference_id VARCHAR(80) NULL,
-  payment_id VARCHAR(80) NULL,
-  avisado TINYINT(1) NOT NULL DEFAULT 0,
-  created_at DATETIME NOT NULL,
-  paid_at DATETIME NULL,
-  INDEX (estado),
-  INDEX (habitacion)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-");
 
-/* ====== Pagos online de habitaciones ====== */
-$conn->query("
-CREATE TABLE IF NOT EXISTS pagos_online_habitaciones (
-  id INT AUTO_INCREMENT PRIMARY KEY,
-  habitacion INT NOT NULL,
-  turno VARCHAR(30) NOT NULL,
-  bloques INT NOT NULL DEFAULT 1,
-  monto INT NOT NULL DEFAULT 0,
-  payment_id VARCHAR(80) NULL,
-  created_at DATETIME NOT NULL,
-  avisado TINYINT(1) NOT NULL DEFAULT 0,
-  INDEX (habitacion),
-  INDEX (avisado),
-  UNIQUE KEY unique_payment_id (payment_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-");
-$col = $conn->query("SHOW COLUMNS FROM pagos_online_habitaciones LIKE 'payment_id'");
-if ($col && $col->num_rows === 0) {
-  $conn->query("ALTER TABLE pagos_online_habitaciones ADD COLUMN payment_id VARCHAR(80) NULL");
-}
-$idx = $conn->query("SHOW INDEX FROM pagos_online_habitaciones WHERE Key_name='unique_payment_id'");
-if ($idx && $idx->num_rows === 0) {
-  $conn->query("ALTER TABLE pagos_online_habitaciones ADD UNIQUE KEY unique_payment_id (payment_id)");
-}
 
 
 /* ====== Mensajes internos ====== */
@@ -286,18 +215,6 @@ function nowArgDT(){ return new DateTime('now', new DateTimeZone('America/Argent
 function nowUTCStrFromArg(){ $dt=nowArgDT(); $dt->setTimezone(new DateTimeZone('UTC')); return $dt->format('Y-m-d H:i:s'); }
 function argDateToday(){ return nowArgDT()->format('Y-m-d'); }
 function toArgDT($utc){ if(!$utc) return null; $dt=new DateTime($utc,new DateTimeZone('UTC')); $dt->setTimezone(new DateTimeZone('America/Argentina/Buenos_Aires')); return $dt; }
-function argDateRangeToUtcBounds(string $date){
-  $tzArg = new DateTimeZone('America/Argentina/Buenos_Aires');
-  $tzUtc = new DateTimeZone('UTC');
-
-  $start = new DateTime($date.' 00:00:00', $tzArg);
-  $start->setTimezone($tzUtc);
-
-  $end = new DateTime($date.' 23:59:59', $tzArg);
-  $end->setTimezone($tzUtc);
-
-  return [$start->format('Y-m-d H:i:s'), $end->format('Y-m-d H:i:s')];
-}
 function toArgTs($utc){
   if(!$utc) return null;
   $dtUtc = new DateTime($utc, new DateTimeZone('UTC'));
@@ -488,18 +405,11 @@ function cajaTotalDesdeHasta($conn,$inicioUTC,$finUTC=null){
   if($finUTC){ $st->bind_param('ss',$inicioUTC,$finUTC); } else { $st->bind_param('s',$inicioUTC); }
     $st->execute(); $resVen = $st->get_result()->fetch_assoc(); $st->close();
 
-  // Ajustes por pagos online (se descuentan de la caja en efectivo)
-  $sqlPg = "SELECT SUM(monto) total FROM pagos_online_habitaciones WHERE created_at >= ?".($finUTC?" AND created_at < ?":"");
-  $st = $conn->prepare($sqlPg);
-  if($finUTC){ $st->bind_param('ss',$inicioUTC,$finUTC); } else { $st->bind_param('s',$inicioUTC); }
-  $st->execute(); $resPg = $st->get_result()->fetch_assoc(); $st->close();
-
   $totalHab = (int)($resHab['total'] ?? 0);
   $cantHab  = (int)($resHab['cant'] ?? 0);
   $totalVen = (int)($resVen['total'] ?? 0);
-  $totalPg  = (int)($resPg['total'] ?? 0);
 
-  $totalCaja = $totalHab + $totalVen - $totalPg; // online resta efectivo
+  $totalCaja = $totalHab + $totalVen;
 
   return [ $totalCaja, $cantHab ];
 }
@@ -532,27 +442,15 @@ function cajaDetalleDesdeHasta($conn,$inicioUTC,$finUTC=null,$limit=150){
      FROM ventas_turno v
      LEFT JOIN cobros_movimientos cm ON cm.id = v.id AND cm.tipo = 'venta'
      WHERE v.hora >= ?".($finUTC?" AND v.hora < ?":"").")
-     UNION ALL
-    (SELECT
-        id,
-        habitacion,
-        CONVERT(turno USING utf8mb4) COLLATE $col AS turno,
-        created_at AS hora_inicio,
-        (monto * -1) AS monto,
-        'ajuste' COLLATE $col AS tipo,
-        'Pago online' COLLATE $col AS nombre,
-        1 AS cobrado
-     FROM pagos_online_habitaciones
-     WHERE created_at >= ?".($finUTC?" AND created_at < ?":"").")
     ORDER BY hora_inicio ASC
     LIMIT $limit
   ";
 
   $st = $conn->prepare($sql);
   if($finUTC){
-    $st->bind_param('ssssss',$inicioUTC,$finUTC,$inicioUTC,$finUTC,$inicioUTC,$finUTC);
+    $st->bind_param('ssss',$inicioUTC,$finUTC,$inicioUTC,$finUTC);
   } else {
-    $st->bind_param('sss',$inicioUTC,$inicioUTC,$inicioUTC);
+    $st->bind_param('ss',$inicioUTC,$inicioUTC);
   }
   $st->execute();
   $res = $st->get_result();
@@ -724,78 +622,6 @@ if($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion'])){
     $up->close();
 
     echo json_encode(['ok'=>1,'cobrado'=>$nuevo]);
-    exit;
-  }
-if ($accion === 'ack_minibar') {
-    $id = intval($_POST['id'] ?? 0);
-    if ($id <= 0) {
-      echo json_encode(['ok'=>0,'error'=>'ID inválido']);
-      exit;
-    }
-    $stmt = $conn->prepare("UPDATE minibar_pedidos SET avisado=1, estado='entregado' WHERE id=?");
-    $stmt->bind_param('i', $id);
-    $stmt->execute();
-    $stmt->close();
-    echo json_encode(['ok'=>1]);
-    exit;
-  }
-  if ($accion === 'ack_pago_online') {
-    $id = intval($_POST['id'] ?? 0);
-    if ($id <= 0) {
-      echo json_encode(['ok'=>0,'error'=>'ID inválido']);
-      exit;
-    }
-    $conn->begin_transaction();
-
-    // 1) Marcar alerta como atendida y obtener la habitación
-    $sel = $conn->prepare("SELECT habitacion FROM pagos_online_habitaciones WHERE id=? LIMIT 1 FOR UPDATE");
-    $sel->bind_param('i', $id);
-    $sel->execute();
-    $row = $sel->get_result()->fetch_assoc();
-    $sel->close();
-
-    $updAviso = $conn->prepare("UPDATE pagos_online_habitaciones SET avisado=1 WHERE id=?");
-    $updAviso->bind_param('i', $id);
-    $updAviso->execute();
-    $updAviso->close();
-
-    
-    $habitacion = intval($row['habitacion'] ?? 0);
-    $pagoTurno = strval($row['turno'] ?? '');
-    $pagoBloques = max(1, intval($row['bloques'] ?? 1));
-    $pagoFecha = $row['created_at'] ?? null;
-
-    // 2) Ajustar el registro manual según la hora del pago (ventana 20 minutos)
-    if ($habitacion > 0 && $pagoTurno !== 'envio-dinero' && $pagoFecha) {
-      $pagoTime = new DateTime($pagoFecha, new DateTimeZone('UTC'));
-      $window = clone $pagoTime;
-      $window->modify('-20 minutes');
-      $limiteStr = $window->format('Y-m-d H:i:s');
-
-      $selHist = $conn->prepare("SELECT id, bloques, precio_aplicado FROM historial_habitaciones WHERE habitacion=? AND codigo IS NULL AND hora_fin IS NULL AND hora_inicio >= ? ORDER BY id DESC LIMIT 1");
-      $selHist->bind_param('is', $habitacion, $limiteStr);
-      $selHist->execute();
-      $histRow = $selHist->get_result()->fetch_assoc();
-      $selHist->close();
-
-      if ($histRow && ($histRow['id'] ?? null)) {
-        $hid = intval($histRow['id']);
-        $bloquesActuales = max(1, intval($histRow['bloques'] ?? 1));
-        $precioActual = max(0, intval($histRow['precio_aplicado'] ?? 0));
-        $bloquesADescontar = min($bloquesActuales, $pagoBloques);
-        $precioPorBloque = $bloquesActuales > 0 ? (int) round($precioActual / $bloquesActuales) : 0;
-        $nuevoPrecio = max(0, $precioActual - ($precioPorBloque * $bloquesADescontar));
-        $bloquesRestantes = max(0, $bloquesActuales - $bloquesADescontar);
-
-        $updHist = $conn->prepare("UPDATE historial_habitaciones SET codigo='pago_online', precio_aplicado=?, bloques=? WHERE id=?");
-        $updHist->bind_param('iii', $nuevoPrecio, $bloquesRestantes, $hid);
-        $updHist->execute();
-        $updHist->close();
-      }
-    }
-
-    $conn->commit();
-    echo json_encode(['ok'=>1]);
     exit;
   }
   
@@ -1069,41 +895,6 @@ if($curOpen){
     exit;
   }
 
-  if($accion==='export_csv'){
-    $desde = preg_replace('/[^0-9\-]/','', $_POST['desde'] ?? argDateToday());
-    $hasta = preg_replace('/[^0-9\-]/','', $_POST['hasta'] ?? argDateToday());
-    $tipo  = preg_replace('/[^a-zA-Z\s]/','', $_POST['tipo']  ?? 'todos');
-
-    $sql = "SELECT habitacion, tipo, estado, turno, hora_inicio, hora_fin, duracion_minutos, fecha_registro, precio_aplicado, es_extra
-            FROM historial_habitaciones
-            WHERE fecha_registro BETWEEN ? AND ?";
-    if($tipo!=='todos') $sql.=" AND tipo=?";
-    $sql.=" ORDER BY COALESCE(hora_fin,hora_inicio) DESC";
-    $stmt = $conn->prepare($sql);
-    if($tipo!=='todos'){ $stmt->bind_param('sss',$desde,$hasta,$tipo); } else { $stmt->bind_param('ss',$desde,$hasta); }
-    $stmt->execute(); $result = $stmt->get_result();
-
-    $fname = "reporte-".$desde.($desde!==$hasta?"_a_".$hasta:"").($tipo!=='todos'?"-".str_replace(' ','_',$tipo):"").".csv";
-    header('Content-Type: text/csv; charset=utf-8');
-    header('Content-Disposition: attachment; filename="'.$fname.'"');
-    $out = fopen('php://output','w');
-    fputcsv($out, ['Habitación','Tipo','Turno (normal/extra)','Hora Inicio (ARG)','Día','Mes','Año','Hora Fin (ARG)','Duración (min)','Monto']);
-    while($row=$result->fetch_assoc()){
-      fputcsv($out, [
-        $row['habitacion']??'',
-        $row['tipo']??'',
-        (($row['es_extra']??0)?'extra':'normal'),
-        fmtHoraArg($row['hora_inicio']??''),
-        partDia($row['hora_inicio']??''),
-        partMes($row['hora_inicio']??''),
-        partAnio($row['hora_inicio']??''),
-        fmtHoraArg($row['hora_fin']??''),
-        $row['duracion_minutos']??'',
-        (int)($row['precio_aplicado']??0)
-      ]);
-    }
-    fclose($out); exit;
-  }
 
 if ($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion']) && $_POST['accion']==='iniciar_turno'){
   $nuevo = $_POST['nuevo'] ?? '';
@@ -1173,7 +964,7 @@ function safe($v){ return htmlspecialchars($v ?? ''); }
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Panel Telo</title>
+<title>Panel Nuevo</title>
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
@@ -1371,7 +1162,7 @@ header{position:sticky;top:0;z-index:5;background:#fff;border-bottom:1px solid v
   .room-card::after{ bottom:6px; font-size:8px; font-weight:200; }
 }
 
-/* Registros */
+/* Tablas */
 .card{background:#fff;border:1px solid var(--border);border-radius:16px;padding:16px;box-shadow:var(--shadow)}
 .controls{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:12px}
 .controls input[type=date], .controls select{background:#fff;border:1px solid var(--border);border-radius:10px;padding:8px 10px}
@@ -1747,18 +1538,8 @@ html, body { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grays
     <div class="nav">
         <button class="<?php echo ($view==='panel'?'active':''); ?>" onclick="location.href='?view=panel'">Panel</button>
         <button class="<?php echo ($view==='reportes'?'active':''); ?>" onclick="location.href='?view=reportes'">Reportes</button>
-        <button
-  class=""
-  onclick="window.open('https://lamoradatandil.com/inventario.php', '_blank')"
->
-  Inventario
-</button>
-<button onclick="window.open('https://lamoradatandil.com/minibar.php','_blank')">Link menú</button>
-        
-        <button onclick="window.open('https://lamoradatandil.com/envio-dinero.php','_blank')">Enviar dinero</button>
-      <button class="<?php echo ($view==='minibar'?'active':''); ?>" onclick="location.href='?view=minibar'">Minibar</button>
-      <button class="<?php echo ($view==='registros'?'active':''); ?>" onclick="location.href='?view=registros'">Habitaciones</button>
-      <button class="<?php echo ($view==='valores'?'active':''); ?>" onclick="location.href='?view=valores'">Editar valores</button>
+        <button onclick="window.open('https://lamoradatandil.com/inventario.php', '_blank')">Inventario</button>
+        <button class="<?php echo ($view==='valores'?'active':''); ?>" onclick="location.href='?view=valores'">Editar valores</button>
       <div class="clock" id="arg-clock">--:--:--</div>
       <span id="turno-label" style="font-weight:700;margin-left:8px;color:#0B5FFF">Turnos de -- h</span>
     </div>
@@ -1767,13 +1548,9 @@ html, body { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grays
 <!-- Menú móvil -->
 <div id="mobile-menu">
   <button onclick="location.href='?view=panel'">Panel</button>
-  <button onclick="location.href='?view=minibar'">Minibar</button>
-  <button onclick="location.href='?view=registros'">Habitaciones</button>
   <button onclick="location.href='?view=valores'">Editar valores</button>
   <button onclick="location.href='?view=reportes'">Reportes</button>
   <button onclick="window.open('https://lamoradatandil.com/inventario.php','_blank')">Inventario</button>
-  <button onclick="window.open('https://lamoradatandil.com/minibar.php','_blank')">Link menú</button>
-  <button onclick="window.open('https://lamoradatandil.com/envio-dinero.php','_blank')">Enviar dinero</button>
 </div>
 
 <script>
@@ -2586,215 +2363,6 @@ document.addEventListener("click", async e => {
 </main>
 <?php endif; ?>
 
-<?php if($view==='registros'):
-  $desde = preg_replace('/[^0-9\-]/','', $_GET['desde'] ?? argDateToday());
-  $hasta = preg_replace('/[^0-9\-]/','', $_GET['hasta'] ?? argDateToday());
-  $tipoF = $_GET['tipo'] ?? 'todos';
-
-  $summary = ['total'=>0,'super'=>0,'vip'=>0,'comun'=>0,'t2'=>0,'t3'=>0,'tnoche'=>0,'monto'=>0];
-  $rows = [];
-  $sql = "SELECT habitacion, tipo, estado, turno, hora_inicio, hora_fin, duracion_minutos, fecha_registro, precio_aplicado, es_extra
-          FROM historial_habitaciones
-          WHERE fecha_registro BETWEEN ? AND ?";
-  if($tipoF!=='todos') $sql.=" AND tipo=?";
- $sql.=" ORDER BY hora_inicio DESC";
-  $stmt = $conn->prepare($sql);
-  if($tipoF!=='todos'){ $stmt->bind_param('sss',$desde,$hasta,$tipoF); } else { $stmt->bind_param('ss',$desde,$hasta); }
-  $stmt->execute(); $res = $stmt->get_result();
-  while($r = $res->fetch_assoc()){
-    $rows[] = $r;
-    $summary['total']++;
-    if($r['tipo']==='Super VIP') $summary['super']++; elseif($r['tipo']==='VIP') $summary['vip']++; else $summary['comun']++;
-    if($r['turno']==='turno-2h') $summary['t2']++; elseif($r['turno']==='turno-3h') $summary['t3']++; elseif($r['turno']==='noche' || $r['turno']==='noche-finde') $summary['tnoche']++;
-
-    // Total del día: SOLO registros cerrados (hora_fin no nula), normal + extra
-    if(!empty($r['hora_fin'])){
-      $summary['monto'] += (int)($r['precio_aplicado'] ?? 0);
-    }
-  }
-  $stmt->close();
-
-  // Formateo de total con separador de miles (AR)
-  $fmtTotal = number_format((int)$summary['monto'], 0, ',', '.');
-?>
-<main class="container">
-  <div class="card">
-    <h2 style="margin:0 0 10px 0">📅 Registros</h2>
-    <form method="get" class="controls">
-      <input type="hidden" name="view" value="registros">
-      <label>Desde <input type="date" name="desde" value="<?php echo safe($desde); ?>"></label>
-      <label>Hasta <input type="date" name="hasta" value="<?php echo safe($hasta); ?>"></label>
-      <label>Tipo
-        <select name="tipo">
-          <?php
-            $opts = ['todos'=>'Todos','Super VIP'=>'Super VIP','VIP'=>'VIP','Común'=>'Común'];
-            foreach($opts as $val=>$txt){
-              $sel = ($tipoF===$val)?'selected':'';
-              echo "<option value=\"".safe($val)."\" $sel>".safe($txt)."</option>";
-            }
-          ?>
-        </select>
-      </label>
-      <button type="submit">Buscar</button>
-      <button type="button" class="ghost" onclick="location.href='?view=registros'">Borrar filtros</button>
-      <button type="button" onclick="exportCSV()">Exportar CSV</button>
-      <a href="?view=panel" style="margin-left:auto;text-decoration:none;color:#0B5FFF">← Volver al panel</a>
-    </form>
-
-    <div class="summary">
-      <div class="chip">Total ocupaciones: <b><?php echo $summary['total']; ?></b></div>
-      <div class="chip">Super VIP: <b><?php echo $summary['super']; ?></b></div>
-      <div class="chip">VIP: <b><?php echo $summary['vip']; ?></b></div>
-      <div class="chip">Comunes: <b><?php echo $summary['comun']; ?></b></div>
-      <div class="chip">Turno 2h: <b><?php echo $summary['t2']; ?></b></div>
-      <div class="chip">Turno 3h: <b><?php echo $summary['t3']; ?></b></div>
-      <div class="chip">Noche: <b><?php echo $summary['tnoche']; ?></b></div>
-
-    </div>
-
-    <div class="table-container">
-  <table class="table">
-    <thead>
-      <tr>
-        <th>Habitación</th>
-        <th>Tipo</th>
-        <th>Turno</th> <!-- real -->
-        <th>Hora Inicio</th> <!-- ARG sin segundos -->
-        <th>Día</th>
-        <th>Mes</th>
-        <th>Año</th>
-        <th>Hora Final</th> <!-- ARG sin segundos -->
-        <th>Duración (min)</th>
-        <th>Monto</th>
-      </tr>
-    </thead>
-    <tbody>
-  <?php if(empty($rows)): ?>
-    <tr><td colspan="10" style="color:#64748B;padding:18px;background:transparent;border:none">Sin registros en el rango seleccionado.</td></tr>
-  <?php else: foreach($rows as $r): ?>
-    <tr>
-      <td data-label="Habitación"><?= safe($r['habitacion']) ?></td>
-      <td data-label="Tipo"><?= safe($r['tipo']) ?></td>
-      <td data-label="Turno"><?= safe($r['turno']) ?></td>
-      <td data-label="Hora Inicio"><?= safe(fmtHoraArg($r['hora_inicio'])) ?></td>
-      <td data-label="Día"><?= safe(partDia($r['hora_inicio'])) ?></td>
-      <td data-label="Mes"><?= safe(partMes($r['hora_inicio'])) ?></td>
-      <td data-label="Año"><?= safe(partAnio($r['hora_inicio'])) ?></td>
-      <td data-label="Hora Final"><?= safe(fmtHoraArg($r['hora_fin'])) ?></td>
-      <td data-label="Duración (min)"><?= safe($r['duracion_minutos']) ?></td>
-      <td data-label="Monto">$ <?= number_format((int)($r['precio_aplicado']??0),0,',','.') ?></td>
-    </tr>
-  <?php endforeach; endif; ?>
-</tbody>
-  </table>
-</div>
-    <script>
-document.addEventListener('DOMContentLoaded', ()=>{
-  document.querySelectorAll('.table tbody tr').forEach(row=>{
-    const turno = row.cells[2]?.textContent.trim() || '';
-    const duracion = parseInt(row.cells[8]?.textContent.trim() || '0',10);
-    const horaFinTxt = row.cells[7]?.textContent.trim();
-    let marcar = false;
-
-    // Turno 2h → más de 135 minutos
-    if (turno.includes('turno-2h') && duracion > 135) marcar = true;
-
-    // Turno 3h → más de 195 minutos
-    if (turno.includes('turno-3h') && duracion > 195) marcar = true;
-
-    // Turnos noche → más de 15 minutos después de las 10:00
-    if (turno === 'noche' || turno === 'noche-finde') {
-      if (horaFinTxt) {
-        const [h, m] = horaFinTxt.split(':').map(x => parseInt(x, 10));
-        if (h > 10 || (h === 10 && m > 15)) marcar = true;
-      }
-    }
-
-    if (marcar) {
-      row.cells[8].style.color = '#ff0000';
-      row.cells[8].style.fontWeight = 'bold';
-      row.cells[8].style.textShadow = '0 0 4px rgba(255,0,0,0.4)';
-    }
-  });
-});
-
-    </script>
-
-    <div class="count-note">Mostrando <?php echo count($rows); ?> registros</div>
-  </div>
-</main>
-<?php endif; ?>
-<?php if($view==='minibar'):
-  $desde = preg_replace('/[^0-9\-]/','', $_GET['desde'] ?? argDateToday());
-  $hasta = preg_replace('/[^0-9\-]/','', $_GET['hasta'] ?? argDateToday());
-
-  $rows = [];
-  $total = 0;
-
-  list($desdeUtc,) = argDateRangeToUtcBounds($desde);
-  list(,$hastaUtc) = argDateRangeToUtcBounds($hasta);
-
-  $sql = "
-    SELECT id, producto_id, nombre, precio, hora,
-           hora AS hora_local
-    FROM ventas_turno
-    WHERE hora BETWEEN ? AND ?
-    ORDER BY hora DESC
-  ";
-  $stmt = $conn->prepare($sql);
- $stmt->bind_param('ss', $desdeUtc, $hastaUtc);
-  $stmt->execute();
-  $res = $stmt->get_result();
-  while($r = $res->fetch_assoc()){
-    $rows[] = $r;
-    $total += (int)$r['precio'];
-  }
-  $stmt->close();
-  $fmtTotal = number_format($total,0,',','.');
-?>
-<main class="container">
-  <div class="card">
-    <h2 style="margin:0 0 10px 0">🧃 Registros de Minibar</h2>
-    <form method="get" class="controls">
-      <input type="hidden" name="view" value="minibar">
-      <label>Desde <input type="date" name="desde" value="<?=safe($desde)?>"></label>
-      <label>Hasta <input type="date" name="hasta" value="<?=safe($hasta)?>"></label>
-      <button type="submit">Buscar</button>
-      <button type="button" class="ghost" onclick="location.href='?view=minibar'">Borrar filtros</button>
-      <a href="?view=panel" style="margin-left:auto;text-decoration:none;color:#0B5FFF">← Volver al panel</a>
-    </form>
-
-    <div class="summary">
-      <div class="chip">Total ventas: <b><?=count($rows)?></b></div>
-    </div>
-
-    <table class="table">
-      <thead>
-        <tr>
-          <th>Cant.</th>
-          <th>Producto</th>
-          <th>Hora de venta</th>
-          <th>Monto</th>
-        </tr>
-      </thead>
-      <tbody>
-        <?php if(empty($rows)): ?>
-          <tr><td colspan="4" style="text-align:center;color:#64748B;padding:18px;">Sin ventas registradas</td></tr>
-        <?php else: foreach($rows as $r): ?>
-          <tr style="background:#f0fff4;">
-            <td data-label="Cant.">1</td>
-            <td data-label="Producto">🧃 <?=safe($r['nombre'])?></td>
-            <td data-label="Hora de venta"><?=safe(fmtHoraArg($r['hora_local']))?></td>
-            <td data-label="Monto" style="text-align:right;">$ <?=number_format((int)$r['precio'],0,',','.')?></td>
-          </tr>
-        <?php endforeach; endif; ?>
-      </tbody>
-    </table>
-
-    <div class="count-note">Mostrando <?=count($rows)?> registros</div>
-  </div>
-</main>
-<?php endif; ?>
 <script>
   document.addEventListener('DOMContentLoaded', ()=>{
     const cont = document.querySelector('.table-container');
@@ -3115,157 +2683,6 @@ function renderTime(el,t){
 // ===== Polling 2s
 let MOBILE_BUILT = false;
 
-// ===== Alertas de pedidos de minibar
-let minibarInterval = null;
-let minibarBusy = false;
-let minibarQueue = [];
-let minibarActiveId = null;
-
-async function fetchMinibarAlerts(){
-  if(minibarBusy) return;
-  minibarBusy = true;
-  try{
-    const r = await fetch('?ajax_minibar_alerts=1',{cache:'no-store'});
-    const j = await r.json();
-     const pedidos = Array.isArray(j.pedidos) ? j.pedidos : [];
-    const pendingIds = new Set(pedidos.map(p=>p.id));
-
-      // Cerrar modales abiertos si otro dispositivo ya los atendió
-    if(minibarActiveId && !pendingIds.has(minibarActiveId) && Swal.isVisible()){
-      Swal.close();
-      minibarActiveId = null;
-    }
-
-    // Mantener la cola solo con pendientes
-    minibarQueue = minibarQueue.filter(p=>pendingIds.has(p.id));
-
-    // Agregar nuevos pendientes a la cola, evitando duplicados
-    for(const p of pedidos){
-      if(p.id === minibarActiveId) continue;
-      if(!minibarQueue.some(q=>q.id === p.id)) minibarQueue.push(p);
-    }
-  }catch(e){
-    console.error(e);
-  }
-  minibarBusy = false;
-  processMinibarQueue();
-}
-
-async function processMinibarQueue(){
-  if(minibarActiveId || !minibarQueue.length) return;
-
-  const p = minibarQueue.shift();
-  minibarActiveId = p.id;
-
-  const items = Array.isArray(p.items) ? p.items : [];
-  const html = items.length
-    ? items.map(it=>`${it.cantidad} × ${it.nombre}`).join('<br>')
-    : 'Pedido sin detalle';
-  const totalTxt = (p.total||0).toLocaleString('es-AR');
-
-  try{
-    const res = await Swal.fire({
-      title:`Hab. ${p.habitacion} — Pedido pago`,
-      html:`${html}<br><br><b>Total abonado:</b> $${totalTxt}`,
-      icon:'info',
-      confirmButtonText:'Aceptar y llevar',
-      cancelButtonText:'Más tarde',
-      showCancelButton:true
-    });
-
-    if(res.isConfirmed){
-      await fetch('',{
-        method:'POST',
-        headers:{'Content-Type':'application/x-www-form-urlencoded'},
-        body:new URLSearchParams({accion:'ack_minibar', id:p.id})
-      });
-    }
-  }catch(e){
-    console.error(e);
-  }finally{
-    minibarActiveId = null;
-    processMinibarQueue();
-  }
-}
-
-function startMinibarAlerts(){
-  fetchMinibarAlerts();
-  if(minibarInterval) clearInterval(minibarInterval);
-  minibarInterval = setInterval(fetchMinibarAlerts, 5000);
-}
-// ===== Alertas de pagos online de turnos
-let pagosInterval = null;
-let pagosBusy = false;
-let pagosQueue = [];
-let pagoActiveId = null;
-
-async function fetchPagosOnline(){
-  if(pagosBusy) return;
-  pagosBusy = true;
-  try{
-    const r = await fetch('?ajax_pagos_online=1',{cache:'no-store'});
-    const j = await r.json();
-    const pagos = Array.isArray(j.pagos) ? j.pagos : [];
-    const pendingIds = new Set(pagos.map(p=>p.id));
-
-     if(pagoActiveId && !pendingIds.has(pagoActiveId) && Swal.isVisible()){
-      Swal.close();
-      pagoActiveId = null;
-    }
-
-    pagosQueue = pagosQueue.filter(p=>pendingIds.has(p.id));
-
-    for(const p of pagos){
-      if(p.id === pagoActiveId) continue;
-      if(!pagosQueue.some(q=>q.id === p.id)) pagosQueue.push(p);
-    }
-  }catch(e){ console.error(e); }
-  pagosBusy = false;
-   processPagosQueue();
-}
-
-async function processPagosQueue(){
-  if(pagoActiveId || !pagosQueue.length) return;
-
-  const p = pagosQueue.shift();
-  pagoActiveId = p.id;
-
-  const bloquesTxt = (p.bloques||1) > 1 ? `${p.bloques} turnos` : '1 turno';
-  const totalTxt = (p.monto||0).toLocaleString('es-AR');
-  const esEnvio = (p.turno||'') === 'envio-dinero';
-
-  try{
-    const res = await Swal.fire({
-       title: esEnvio ? `Hab. ${p.habitacion} envió dinero digital` : `Hab. ${p.habitacion} pagó online`,
-      html: esEnvio
-        ? `Transferencia registrada<br><b>Total:</b> $${totalTxt}`
-        : `${p.turno || 'turno'}<br>${bloquesTxt}<br><b>Total:</b> $${totalTxt}`,
-      icon:'info',
-      confirmButtonText:'Aceptar (borrar registro previo)',
-      cancelButtonText:'Más tarde',
-      showCancelButton:true
-    });
-
-    if(res.isConfirmed){
-      await fetch('',{
-        method:'POST',
-        headers:{'Content-Type':'application/x-www-form-urlencoded'},
-        body:new URLSearchParams({accion:'ack_pago_online', id:p.id})
-      });
-    }
-  }catch(e){
-    console.error(e);
-  }finally{
-    pagoActiveId = null;
-    processPagosQueue();
-  }
-}
-
-function startPagoOnlineAlerts(){
-  fetchPagosOnline();
-  if(pagosInterval) clearInterval(pagosInterval);
-  pagosInterval = setInterval(fetchPagosOnline, 5000);
-}
 async function pollUpdates(force=false){
   try{
     const r = await fetch('?ajax=1', {cache:'no-store'});
@@ -3358,19 +2775,6 @@ function buildMobileGrid(){
   MOBILE_BUILT = true;
 }
 
-// ===== Registros: export CSV (POST)
-function exportCSV(){
-  const url=new URL(location.href);
-  const desde=url.searchParams.get('desde')||'';
-  const hasta=url.searchParams.get('hasta')||'';
-  const tipo =url.searchParams.get('tipo') ||'todos';
-  const f=document.createElement('form'); f.method='POST'; f.action=location.href;
-  f.innerHTML=`<input type="hidden" name="accion" value="export_csv">
-               <input type="hidden" name="desde" value="${desde}">
-               <input type="hidden" name="hasta" value="${hasta}">
-               <input type="hidden" name="tipo"  value="${tipo}">`;
-  document.body.appendChild(f); f.submit();
-}
 
 // ===== Init
 let GLOBAL_INTERVAL = null;
@@ -3409,38 +2813,9 @@ document.addEventListener('DOMContentLoaded', ()=>{
       pollUpdates();
     }, 2000);
     
-startMinibarAlerts();
-startPagoOnlineAlerts();
-
     return;
   }
 
-
-  /* =======================
-     🔥 MODO MINIBAR
-     =======================*/
-  const isMinibar = location.search.includes('view=minibar');
-  if (isMinibar) {
-
-    // solo cargar inventario
-    GLOBAL_INTERVAL = setInterval(() => {
-      cargarInventario();
-    }, 5000);
-
-    cargarInventario();
-
-    return;
-  }
-
-
-  /* =======================
-     🔥 MODO REGISTROS
-     =======================*/
-  const isReg = location.search.includes('view=registros');
-  if (isReg) {
-    // Nada de timers ni polling
-    return;
-  }
 
 });
 
@@ -3701,78 +3076,6 @@ async function venderProd(id){
 
 setInterval(cargarInventario, 5000);
 cargarInventario();
-</script>
-<script>
-document.addEventListener('DOMContentLoaded', ()=>{
-  if(window.innerWidth > 768) return; // solo móvil
-
-  const table = document.querySelector('table');
-  if(!table) return;
-
-  const rows = table.querySelectorAll('tbody tr');
-  if(!rows.length) return;
-
-  const isMinibar = location.search.includes('view=minibar');
-  const cardsContainer = document.createElement('div');
-  cardsContainer.className = 'mobile-cards';
-
-  rows.forEach(row=>{
-    const cells = row.querySelectorAll('td');
-    if(!cells.length) return;
-
-    let summaryHTML = '';
-    let durClass = '';
-
-    if (isMinibar) {
-      // 🧃 Formato MINIBAR
-      const prod = cells[1]?.innerText.trim() || '-';
-      const hora = cells[2]?.innerText.trim() || '-';
-      const monto = cells[3]?.innerText.trim() || '$0';
-      summaryHTML = `<span>Prod: ${prod}</span><span>Hora: ${hora}</span><span>Mto: ${monto}</span>`;
-    } else {
-      // 🛏️ Formato HABITACIONES
-      const hab = cells[0]?.innerText.trim() || '-';
-      const tipoTurno = cells[2]?.innerText.trim() || '';
-      const dur = parseInt(cells[8]?.innerText.trim() || '0',10);
-      const monto = cells[9]?.innerText.trim() || '$0';
-      const horaFinTxt = cells[7]?.innerText.trim() || '';
-
-      if (tipoTurno.includes('turno-2h') && dur > 135) durClass = 'duracion-larga';
-      else if (tipoTurno.includes('turno-3h') && dur > 195) durClass = 'duracion-larga';
-      else if ((tipoTurno.includes('noche') || tipoTurno.includes('noche-finde')) && horaFinTxt) {
-        const [h,m] = horaFinTxt.split(':').map(x=>parseInt(x,10));
-        if (h > 10 || (h === 10 && m > 15)) durClass = 'duracion-larga';
-      }
-
-      summaryHTML = `<span>Hab: ${hab}</span><span class="${durClass}">Dur: ${dur}</span><span>Mto: ${monto}</span>`;
-    }
-
-    // Crear tarjeta
-    const card = document.createElement('div');
-    card.className = 'mobile-card';
-    card.innerHTML = `
-      <div class="mobile-summary">${summaryHTML}</div>
-      <div class="mobile-details">
-        ${Array.from(cells).map((c,i)=>{
-          const th = table.querySelector('thead th:nth-child('+(i+1)+')');
-          const label = th ? th.innerText : '';
-          return `<div><b>${label}:</b> ${c.innerText}</div>`;
-        }).join('')}
-      </div>
-    `;
-
-    card.querySelector('.mobile-summary').addEventListener('click',()=>{
-      const d = card.querySelector('.mobile-details');
-      d.classList.toggle('active');
-    });
-
-    cardsContainer.appendChild(card);
-  });
-
-  table.style.display = 'none';
-  table.parentNode.insertBefore(cardsContainer, table.nextSibling);
-});
-
 </script>
 </body>
 </html>
