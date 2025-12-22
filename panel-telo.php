@@ -221,6 +221,20 @@ function toArgTs($utc){
   $dtUtc->setTimezone(new DateTimeZone('America/Argentina/Buenos_Aires'));
   return $dtUtc->getTimestamp();
 }
+function argDateFromTs($ts){
+  $dt = new DateTime('@'.$ts);
+  $dt->setTimezone(new DateTimeZone('America/Argentina/Buenos_Aires'));
+  return $dt->format('Y-m-d');
+}
+function turnoEndArgTs($turno,$startArgTs,$bloques=1){
+  $bloques = max(1, (int)$bloques);
+  if($turno==='turno-2h'){ return $startArgTs + (2 * 3600 * $bloques); }
+  if($turno==='turno-3h'){ return $startArgTs + (3 * 3600 * $bloques); }
+  if(in_array($turno, ['noche','noche-finde','noche-find'], true)){
+    return nightEndTsFromStartArg($startArgTs);
+  }
+  return $startArgTs;
+}
 function argNowInfo(){ $dt=nowArgDT(); return [(int)$dt->format('w'), (int)$dt->format('G')]; } // 0=Dom..6=Sab
 function isTwoHourWindowNow(int $dow, int $hour){
   return ($dow===5 && $hour>=8) || $dow===6 || $dow===0; // Vie 8am → Dom 23:59
@@ -743,15 +757,28 @@ if ($accion === 'mover_reserva') {
         $open->close();
 
         if($curOpen){
-            $turnoHabitacion = $curOpen['turno'] ?? $turnoTag;
-            $inicioHabitacion = $curOpen['hora_inicio'] ?? $startUTC;
-            $bloquesActuales = max(1,(int)($curOpen['bloques'] ?? 1)) + 1;
-            $precioExtra = precioVigenteInt($conn, $tipoHab, $turnoHabitacion);
+            $startArgTs = toArgTs($curOpen['hora_inicio'] ?? null);
+            $endArgTs = $startArgTs ? turnoEndArgTs($curOpen['turno'] ?? '', $startArgTs, $curOpen['bloques'] ?? 1) : null;
+            $endUTC = $endArgTs ? gmdate('Y-m-d H:i:s', $endArgTs) : $startUTC;
+            $mins = ($startArgTs!==null && $endArgTs!==null)
+              ? max(0, intval(round(($endArgTs - $startArgTs) / 60)))
+              : 0;
 
-            $upd = $conn->prepare("UPDATE historial_habitaciones SET bloques=?, precio_aplicado = COALESCE(precio_aplicado,0)+? WHERE id=?");
-            $upd->bind_param('iii',$bloquesActuales,$precioExtra,$curOpen['id']);
-            $upd->execute();
-            $upd->close();
+            $close = $conn->prepare("UPDATE historial_habitaciones SET hora_fin=?, duracion_minutos=? WHERE id=?");
+            $close->bind_param('sii',$endUTC,$mins,$curOpen['id']);
+            $close->execute();
+            $close->close();
+
+            $turnoHabitacion = $turnoTag;
+            $inicioHabitacion = $endUTC;
+            $precio = precioVigenteInt($conn, $tipoHab, $turnoTag);
+            $fecha = $endArgTs ? argDateFromTs($endArgTs) : $fecha;
+
+            $ins=$conn->prepare("INSERT INTO historial_habitaciones (habitacion,tipo,estado,turno,hora_inicio,fecha_registro,precio_aplicado,es_extra,bloques)
+                             VALUES (?,?,?,?,?,?,?,1,1)");
+            $ins->bind_param('isssssi',$id,$tipoHab,$estado,$turnoTag,$inicioHabitacion,$fecha,$precio);
+            $ins->execute();
+            $ins->close();
         } else {
             // precio vigente congelado
             $precio = precioVigenteInt($conn, $tipoHab, $turnoTag);
@@ -846,46 +873,30 @@ if($accion==='reactivar_extra'){
     $inicioHabitacion = $startUTC;
 
 if($curOpen){
-        $turnoAbierto = $curOpen['turno'] ?? '';
-        $esNocheAbierta = in_array($turnoAbierto, ['noche','noche-finde','noche-find'], true);
+        $startArgTs = toArgTs($curOpen['hora_inicio'] ?? null);
+        $endArgTs = $startArgTs ? turnoEndArgTs($curOpen['turno'] ?? '', $startArgTs, $curOpen['bloques'] ?? 1) : null;
+        $endUTC = $endArgTs ? gmdate('Y-m-d H:i:s', $endArgTs) : $startUTC;
+        $mins = ($startArgTs!==null && $endArgTs!==null)
+          ? max(0, intval(round(($endArgTs - $startArgTs) / 60)))
+          : 0;
 
-        if($esNocheAbierta){
-            $endUTC = $startUTC;
-            $startArgTs = toArgTs($curOpen['hora_inicio'] ?? null);
-            $endArgTs   = toArgTs($endUTC);
-            $mins = ($startArgTs!==null && $endArgTs!==null)
-              ? max(0, intval(round(($endArgTs - $startArgTs) / 60)))
-              : 0;
-
-            $close = $conn->prepare("UPDATE historial_habitaciones SET hora_fin=?, duracion_minutos=? WHERE id=?");
-            $close->bind_param('sii',$endUTC,$mins,$curOpen['id']);
-            $close->execute();
-            $close->close();
-
-            $turnoHabitacion = $turnoTag;
-            $inicioHabitacion = $startUTC;
-            $curOpen = null; // crea un nuevo bloque extra con turno standard
-        }
+        $close = $conn->prepare("UPDATE historial_habitaciones SET hora_fin=?, duracion_minutos=? WHERE id=?");
+        $close->bind_param('sii',$endUTC,$mins,$curOpen['id']);
+        $close->execute();
+        $close->close();
     }
 
-    if($curOpen){
-        $turnoHabitacion = $curOpen['turno'] ?? $turnoTag;
-        $inicioHabitacion = $curOpen['hora_inicio'] ?? $startUTC;
-        $bloquesActuales = max(1,(int)($curOpen['bloques'] ?? 1)) + 1;
-        $precioExtra = precioVigenteInt($conn, $tipoHab, $turnoHabitacion);
-
-        $upd = $conn->prepare("UPDATE historial_habitaciones SET bloques=?, precio_aplicado = COALESCE(precio_aplicado,0)+?, es_extra=1 WHERE id=?");
-        $upd->bind_param('iii',$bloquesActuales,$precioExtra,$curOpen['id']);
-        $upd->execute();
-        $upd->close();
-    } else {
-        $estado='ocupada';
-        $ins=$conn->prepare("INSERT INTO historial_habitaciones (habitacion,tipo,estado,turno,hora_inicio,fecha_registro,precio_aplicado,es_extra,bloques)
-                         VALUES (?,?,?,?,?,?,?,1,1)");
-        $ins->bind_param('isssssi',$id,$tipoHab,$estado,$turnoTag,$startUTC,$fecha,$precio);
-        $ins->execute();
-        $ins->close();
+    $turnoHabitacion = $turnoTag;
+    $inicioHabitacion = $endUTC ?? $startUTC;
+    if(isset($endArgTs) && $endArgTs){
+      $fecha = argDateFromTs($endArgTs);
     }
+    $estado='ocupada';
+    $ins=$conn->prepare("INSERT INTO historial_habitaciones (habitacion,tipo,estado,turno,hora_inicio,fecha_registro,precio_aplicado,es_extra,bloques)
+                     VALUES (?,?,?,?,?,?,?,1,1)");
+    $ins->bind_param('isssssi',$id,$tipoHab,$estado,$turnoTag,$inicioHabitacion,$fecha,$precio);
+    $ins->execute();
+    $ins->close();
 
     // Asegurar que la habitación quede marcada como ocupada y con inicio correcto
     $st=$conn->prepare("UPDATE habitaciones SET estado='ocupada', tipo_turno=?, hora_inicio=? WHERE id=?");
