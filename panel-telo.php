@@ -603,9 +603,28 @@ if ($_SERVER['REQUEST_METHOD']==='GET' && isset($_GET['ajax_turno']) && $_GET['a
 
   $inicioArg = fmtHoraArg($cur['inicio']);
 
-
-list($total,) = cajaTotalDesdeHasta($conn, $cur['inicio']);
+list($totalBase,) = cajaTotalDesdeHasta($conn, $cur['inicio']);
   $detalle = cajaDetalleDesdeHasta($conn, $cur['inicio'], null, 300);
+  
+  $movsDigital = digitalIngresosDesdeHasta($conn, $cur['inicio'], null, 300);
+  $digitalTotal = 0;
+  foreach($movsDigital as $d){
+    $digitalTotal += (float)$d['monto'];
+    $detalle[] = [
+      'id' => $d['id'],
+      'tipo' => 'digital',
+      'hab' => $d['habitacion'] ? ('💳 Hab. '.$d['habitacion']) : ('💳 '.($d['tipo'] ?: 'Ingreso digital')),
+      'inicio' => fmtHoraArg($d['created_at']),
+      'monto' => (int)round($d['monto']),
+      'cobrado' => 1
+    ];
+  }
+  usort($detalle, function($a,$b){
+    return strcmp($a['inicio'] ?? '', $b['inicio'] ?? '');
+  });
+
+  $total = $totalBase + $digitalTotal;
+
 
   echo json_encode([
     'ok' => 1,
@@ -613,6 +632,7 @@ list($total,) = cajaTotalDesdeHasta($conn, $cur['inicio']);
     'turno_txt' => turnoNombre($cur['turno']),
     'inicio_arg' => $inicioArg,
     'total' => $total,
+    'digital_total' => $digitalTotal,
     'detalle' => $detalle
   ]);
   exit;
@@ -2476,7 +2496,9 @@ $promedio_turno = ($cantidad_turnos > 0)
   <div style="margin-bottom:6px; font-weight:bold; font-size:14px;">
     Inicio: <span id="turno-inicio">--:--</span> — Total: <span id="turno-total">0</span>
   </div>
-
+<div id="turno-digital-note" style="margin:-4px 0 8px 0; font-size:12px; color:#047857; display:none;">
+    Incluye ingresos digitales: $ 0
+  </div>
   <div id="turno-movimientos" style="max-height:200px; overflow-y:auto; border:1px solid #e5e7eb; border-radius:8px; background:#fff;">
     <table style="width:100%; border-collapse:collapse; font-size:12px;">
      <thead style="position:sticky; top:0; background:#f3f4f6;">
@@ -2677,14 +2699,26 @@ async function actualizarTurnoBox(){
     document.getElementById('turno-actual-label').textContent = 'Turno actual: '+ (j.turno_txt || '—' );
     document.getElementById('turno-inicio').textContent = j.inicio_arg||'--:--';
     document.getElementById('turno-total').textContent = (j.total||0).toLocaleString('es-AR');
+    const digitalNote = document.getElementById('turno-digital-note');
+    if(digitalNote){
+      const digitalVal = Math.round(j.digital_total||0);
+      if(digitalVal>0){
+        digitalNote.style.display = 'block';
+        digitalNote.textContent = `Incluye ingresos digitales: $ ${digitalVal.toLocaleString('es-AR')}`;
+      } else {
+        digitalNote.style.display = 'none';
+      }
+    }
 
       const body=document.getElementById('tb-mov-body');
     if(j.detalle && j.detalle.length){
      body.innerHTML=j.detalle.map(m=>{
-        const toggleable = m.tipo !== 'ajuste';
-        const bg = toggleable ? (m.cobrado ? '#dcfce7' : '#fee2e2') : '#f3f4f6';
+        const isDigital = m.tipo === 'digital';
+        const toggleable = (m.tipo === 'hab' || m.tipo === 'venta');
+        const showDelete = (m.tipo === 'hab' || m.tipo === 'venta');
+        const bg = isDigital ? '#eff6ff' : (toggleable ? (m.cobrado ? '#dcfce7' : '#fee2e2') : '#f3f4f6');
         const cursor = toggleable ? 'pointer' : 'default';
-        const cobradoTxt = toggleable ? (m.cobrado ? 'Cobrado' : 'Pendiente') : '';
+        const cobradoTxt = toggleable ? (m.cobrado ? 'Cobrado' : 'Pendiente') : (isDigital ? 'Aprobado' : '');
         return `
           <tr
             data-id="${m.id}"
@@ -2696,8 +2730,8 @@ async function actualizarTurnoBox(){
             <td style="padding:4px 6px;">${m.inicio}</td>
             <td style="padding:4px 6px; text-align:right; ${m.monto<0?'color:#b91c1c;':'color:#111827;'}">${m.monto}</td>
             <td style="padding:4px 6px; text-align:center;">
-              ${toggleable ? `<span style="font-size:10px;color:#374151;display:block;">${cobradoTxt}</span>` : ''}
-              ${m.tipo==='ajuste' ? '' : `
+              ${toggleable || isDigital ? `<span style="font-size:10px;color:#374151;display:block;">${cobradoTxt}</span>` : ''}
+              ${showDelete ? `
                 <button
                   class="btn-del-mov"
                   data-id="${m.id}"
@@ -2705,7 +2739,7 @@ async function actualizarTurnoBox(){
                   style="border:none;background:none;font-size:16px;cursor:pointer;">
                   🗑
                 </button>
-              `}
+              ` : ''}
             </td>
           </tr>
         `;

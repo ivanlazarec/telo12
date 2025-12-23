@@ -180,6 +180,46 @@ function crearPreferenciaMP($title,$amount,$token,$description){
   $j = json_decode($resp, true);
   return [$j['init_point'] ?? null, $j['id'] ?? null];
 }
+function normalizarEstadoPago($status,$collectionStatus=null){
+  $candidatos = array_filter(array_map(function($v){
+    return strtolower(trim((string)$v));
+  }, [$status, $collectionStatus]));
+
+  foreach($candidatos as $st){
+    if(in_array($st, ['success','approved','accredited','authorized'], true)){
+      return 'success';
+    }
+  }
+  return $candidatos[0] ?? null;
+}
+function verificarPagoMP($paymentId,$prefEsperado=null){
+  global $MP_ACCESS_TOKEN;
+  $paymentId = preg_replace('/[^a-zA-Z0-9_-]/','', $paymentId ?? '');
+  if(!$paymentId) return ['approved'=>false];
+
+  $endpoint = "https://api.mercadopago.com/v1/payments/".urlencode($paymentId);
+  $ch = curl_init($endpoint);
+  curl_setopt_array($ch, [
+    CURLOPT_RETURNTRANSFER => true,
+    CURLOPT_HTTPHEADER => [
+      'Authorization: Bearer '.$MP_ACCESS_TOKEN
+    ]
+  ]);
+  $resp = curl_exec($ch);
+  $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+  curl_close($ch);
+  if($resp === false || $code >= 400){ return ['approved'=>false]; }
+  $j = json_decode($resp, true);
+  $estado = strtolower($j['status'] ?? '');
+  $prefId = $j['preference_id'] ?? ($j['order']['id'] ?? null);
+  $coincide = $prefEsperado ? ($prefId === $prefEsperado) : true;
+  return [
+    'approved' => ($estado === 'approved'),
+    'status' => $estado,
+    'preference_id' => $prefId,
+    'matches_pref' => $coincide
+  ];
+}
 function guardarPagoPendiente($conn,$tipo,$payload,$prefId,$token,$monto,$habitacion,$categoria){
   $ahora = nowUTCStrFromArg();
   $st = $conn->prepare("INSERT INTO pagos_online (tipo,payload,pref_id,token,estado,monto,habitacion,categoria,created_at) VALUES (?,?,?,?, 'pendiente', ?,?,?,?)");
@@ -297,7 +337,7 @@ function finalizarReserva($conn,$payload,$row){
   ];
 }
 
-function procesarRetornoPago($status,$token){
+function procesarRetornoPago($status,$token,$ctx=[]){
   $conn = db();
   $token = preg_replace('/[^a-zA-Z0-9_-]/','',$token ?? '');
   $row = null;
@@ -309,8 +349,16 @@ function procesarRetornoPago($status,$token){
   if(!$row){ return ['ok'=>false,'error'=>'No se encontró la operación.']; }
 
   $payload = json_decode($row['payload'] ?? '{}', true);
+  $statusNorm = normalizarEstadoPago($status, $ctx['collection_status'] ?? null);
 
-  if($row['estado'] !== 'aprobado' && $status==='success'){
+  if($statusNorm !== 'success' && !empty($ctx['payment_id'])){
+    $verif = verificarPagoMP($ctx['payment_id'], $ctx['preference_id'] ?? ($row['pref_id'] ?? null));
+    if(($verif['approved'] ?? false) && ($verif['matches_pref'] ?? true)){
+      $statusNorm = 'success';
+    }
+  }
+
+  if($row['estado'] !== 'aprobado' && $statusNorm==='success'){
     $conn->query("UPDATE pagos_online SET estado='aprobado', updated_at='".nowUTCStrFromArg()."' WHERE id=".(int)$row['id']);
 
     if($row['tipo']==='reserva'){
@@ -343,7 +391,7 @@ function procesarRetornoPago($status,$token){
     'tipo'=>$row['tipo'],
     'habitacion'=>(int)($row['habitacion'] ?? 0),
     'monto'=>$row['monto'] ?? 0,
-    'error'=> $status!=='success' ? 'El pago no fue aprobado' : null
+    'error'=> $statusNorm!=='success' ? 'El pago no fue aprobado' : null
   ];
 }
 
@@ -493,11 +541,18 @@ if($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion'])){
 }
 
 $precios = preciosMap(db());
-$status = $_GET['status'] ?? null;
+$status = $_GET['status'] ?? ($_GET['collection_status'] ?? null);
+$collectionStatus = $_GET['collection_status'] ?? null;
 $tokenRet = $_GET['token'] ?? null;
+$paymentId = $_GET['payment_id'] ?? ($_GET['collection_id'] ?? null);
+$prefBack = $_GET['preference_id'] ?? null;
 $feedback = null;
-if($status && $tokenRet){
-  $feedback = procesarRetornoPago($status,$tokenRet);
+if($tokenRet){
+  $feedback = procesarRetornoPago($status,$tokenRet,[
+    'collection_status'=>$collectionStatus,
+    'payment_id'=>$paymentId,
+    'preference_id'=>$prefBack
+  ]);
 }
 ?>
 <!doctype html>
