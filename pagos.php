@@ -378,7 +378,7 @@ if($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion'])){
     $categoria = $_POST['categoria'] ?? 'comun';
     $modalidad = $_POST['modalidad'] ?? 'turno';
     $bloques = max(1, intval($_POST['bloques'] ?? 1));
-    $duracion = $_POST['duracion'] ?? 'turno-3h';
+    $duracion = turnoBlockHoursForToday()===2 ? 'turno-2h' : 'turno-3h';
     $acepta   = !empty($_POST['acepta']);
 
     if(!$acepta){ echo json_encode(['ok'=>0,'error'=>'Debés confirmar que entendés el inicio del reloj.']); exit; }
@@ -390,7 +390,7 @@ if($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion'])){
       $duracion = isNocheFindeNow($dow,$hour) ? 'noche-finde' : 'noche';
       $bloques = 1;
     }else{
-      $duracion = ($duracion==='turno-2h') ? 'turno-2h' : 'turno-3h';
+      $duracion = turnoBlockHoursForToday()===2 ? 'turno-2h' : 'turno-3h';
     }
 
     $habitacion = habitacionLibrePorCategoria($conn,$categoria,$SUPER_VIP,$VIP_LIST,null);
@@ -621,11 +621,8 @@ if($status && $tokenRet){
           </select>
         </div>
         <div id="turno-fields">
-          <label class="label">Duración de turno</label>
-          <select id="res-duracion">
-            <option value="turno-2h">Turno 2 h</option>
-            <option value="turno-3h" selected>Turno 3 h</option>
-          </select>
+          <label class="label">Duración de turno (automática)</label>
+          <div class="pill" id="res-duracion-auto">Cargando...</div>
         </div>
         <div id="bloques-wrap">
           <label class="label">Cantidad de turnos</label>
@@ -694,18 +691,39 @@ if($status && $tokenRet){
 const PRECIOS = <?= json_encode($precios, JSON_UNESCAPED_UNICODE) ?>;
 const BLOCK_HOURS = <?= turnoBlockHoursForToday() ?>;
 const SUCCESS_FIN_TS = <?= isset($feedback['fin_ts']) && $feedback['fin_ts'] ? (int)$feedback['fin_ts'] : 'null' ?>;
+const AUTO_TURNO_TAG = BLOCK_HOURS===2 ? 'turno-2h' : 'turno-3h';
+const AUTO_TURNO_LABEL = BLOCK_HOURS===2 ? 'Turno 2 h' : 'Turno 3 h';
+
+document.getElementById('res-duracion-auto').textContent = `Hoy se asigna ${AUTO_TURNO_LABEL} automáticamente`;
 
 function formatoPrecio(tipo, turno){
   const val = (PRECIOS?.[tipo]?.[turno]) ?? 0;
   return parseInt(val,10) || 0;
 }
+function esNocheFindeAhora(){
+  const now = new Date();
+  const dow = now.getDay(); // 0=Dom..6=Sab
+  const hour = now.getHours();
+  if(dow===5 && hour>=21) return true;
+  if(dow===6 && (hour<10 || hour>=21)) return true;
+  if(dow===0 && hour<10) return true;
+  return false;
+}
 function actualizarTotales(){
   const cat = document.getElementById('res-categoria').value;
-  const dur = document.getElementById('res-duracion').value;
-  const bloques = parseInt(document.getElementById('res-bloques').value || '1',10);
-  const precio = formatoPrecio(cat==='comun'?'Común':(cat==='vip'?'VIP':'Super VIP'), dur);
-  const total = precio * Math.max(1,bloques);
-  document.getElementById('res-total').textContent = `Total estimado: $ ${total.toLocaleString('es-AR')}`;
+  const mod = document.getElementById('res-modalidad').value;
+  const bloques = Math.max(1, parseInt(document.getElementById('res-bloques').value || '1',10));
+  const tipoLabel = cat==='comun'?'Común':(cat==='vip'?'VIP':'Super VIP');
+
+  if(mod==='noche'){
+    const turnoNoche = esNocheFindeAhora() ? 'noche-finde' : 'noche';
+    const precioNoche = formatoPrecio(tipoLabel, turnoNoche);
+    document.getElementById('res-total').textContent = `Total estimado: $ ${precioNoche.toLocaleString('es-AR')}`;
+  }else{
+    const precio = formatoPrecio(tipoLabel, AUTO_TURNO_TAG);
+    const total = precio * bloques;
+    document.getElementById('res-total').textContent = `Total estimado: $ ${total.toLocaleString('es-AR')}`;
+  }
 
   const extraBloques = parseInt(document.getElementById('extra-bloques').value || '1',10);
   const extraHab = document.getElementById('extra-hab').value.trim();
@@ -715,7 +733,7 @@ function actualizarTotales(){
   const extraPrecio = formatoPrecio(extraTipo, BLOCK_HOURS===2?'turno-2h':'turno-3h');
   document.getElementById('extra-total').textContent = `Total estimado: $ ${(extraPrecio*extraBloques).toLocaleString('es-AR')}`;
 }
-['res-categoria','res-duracion','res-bloques','extra-bloques','extra-hab'].forEach(id=>{
+['res-categoria','res-bloques','res-modalidad','extra-bloques','extra-hab'].forEach(id=>{
   const el=document.getElementById(id);
   if(el) el.addEventListener('input', actualizarTotales);
 });
@@ -725,6 +743,10 @@ function toggleModalidad(){
   const mod = document.getElementById('res-modalidad').value;
   document.getElementById('turno-fields').style.display = mod==='turno' ? 'block' : 'none';
   document.getElementById('bloques-wrap').style.display = mod==='turno' ? 'block' : 'none';
+  if(mod==='noche'){
+    document.getElementById('res-bloques').value = 1;
+  }
+  actualizarTotales();
 }
 document.getElementById('res-modalidad').addEventListener('change', toggleModalidad);
 toggleModalidad();
@@ -761,13 +783,14 @@ async function crearReserva(){
     accion:'crear_reserva',
     categoria: document.getElementById('res-categoria').value,
     modalidad: document.getElementById('res-modalidad').value,
-    duracion: document.getElementById('res-duracion').value,
+    duracion: AUTO_TURNO_TAG,
     bloques: document.getElementById('res-bloques').value,
     acepta: document.getElementById('res-acepta').checked ? 1 : 0
   };
   const r = await fetch('',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams(payload)});
   const j = await r.json();
   if(!j.ok){ alert(j.error||'No se pudo crear la reserva'); return; }
+  alert('Recordá: el reloj comienza a correr una vez que se confirma el pago.');
   window.location.href = j.init_point;
 }
 async function enviarDinero(){
