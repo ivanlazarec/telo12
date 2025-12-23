@@ -602,15 +602,20 @@ if($tokenRet){
     .muted{color:var(--muted);}
     .tag{padding:4px 8px;border-radius:8px;background:rgba(255,255,255,0.05);font-size:12px;}
     .divider{height:1px;background:var(--border);margin:12px 0;}
-    .checkbox-row{display:flex;gap:8px;align-items:flex-start;margin:12px 0;}
+    .checkbox-row{display:inline-flex;gap:8px;align-items:flex-start;margin:12px 0;justify-content:flex-start;width:auto;}
     .checkbox-row input[type=checkbox]{margin:2px 0 0;}
     .checkbox-row span{line-height:1.4;}
+    .confirm-section{margin-top:12px;padding:12px;border-radius:12px;border:1px solid var(--border);background:var(--soft);display:flex;flex-direction:column;gap:8px;align-items:flex-start;}
+    .confirm-total{display:flex;justify-content:flex-start;}
     .map-link{color:var(--accent2);text-decoration:none;font-weight:700;}
     .map-link:hover{text-decoration:underline;}
     .map-link-cta{display:inline-flex;gap:6px;align-items:center;margin-top:10px;}
     @media(max-width:600px){
       header{position:static;}
       .tabs button{flex:1 1 45%;justify-content:center;}
+      .checkbox-row{flex-direction:column;align-items:flex-start;}
+      .confirm-total{width:100%;}
+      .confirm-total .pill{width:100%;justify-content:center;}
     }
   </style>
 </head>
@@ -695,9 +700,13 @@ if($tokenRet){
       </div>
       <div class="divider"></div>
       <div class="alert">Precios vigentes se calculan al momento del pago. El turno noche solo está disponible de 21:00 a 10:00.</div>
-      <label class="checkbox-row"> <input type="checkbox" id="res-acepta"> <span>Entiendo que el reloj comienza a correr una vez que pago.</span>
-      </label>
-      <div id="res-total" class="pill">Total estimado: $ --</div>
+      <div class="confirm-section">
+        <div class="confirm-total">
+          <div id="res-total" class="pill">Total estimado: $ --</div>
+        </div>
+        <label class="checkbox-row"> <input type="checkbox" id="res-acepta"> <span>Entiendo que el reloj comienza a correr una vez que pago.</span>
+        </label>
+      </div>
       <div style="margin-top:12px;">
         <button class="btn" id="res-btn">Pagar y reservar</button>
       </div>
