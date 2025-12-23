@@ -1657,17 +1657,37 @@ $st->close();
       </label>
       <button type="submit">Ver reporte</button>
     </form>
-
+    <style>
+      .table-sortable th {
+        cursor: pointer;
+        user-select: none;
+        position: relative;
+      }
+      .table-sortable th[data-sort-direction="asc"]::after {
+        content: "▲";
+        position: absolute;
+        right: 8px;
+        font-size: 11px;
+        color: #6b7280;
+      }
+      .table-sortable th[data-sort-direction="desc"]::after {
+        content: "▼";
+        position: absolute;
+        right: 8px;
+        font-size: 11px;
+        color: #6b7280;
+      }
+    </style>
     <div class="table-container">
-      <table class="table">
+      <table class="table table-sortable" id="tabla-reporte-empleadas">
         <thead>
           <tr>
-            <th>Habitación</th>
-            <th>Turno</th>
-            <th>Inicio</th>
-            <th>Fin</th>
-            <th>Minutos</th>
-            <th>Nota</th>
+            <th data-sort-key="habitacion">Habitación</th>
+            <th data-sort-key="turno">Turno</th>
+            <th data-sort-key="inicio">Inicio</th>
+            <th data-sort-key="fin">Fin</th>
+            <th data-sort-key="minutos">Minutos</th>
+            <th data-sort-key="nota">Nota</th>
           </tr>
         </thead>
         <tbody>
@@ -1687,6 +1707,85 @@ $st->close();
       </table>
     </div>
   </div>
+  <script>
+    (function() {
+      const table = document.getElementById('tabla-reporte-empleadas');
+      if (!table) return;
+
+      const tbody = table.querySelector('tbody');
+      const headers = table.querySelectorAll('th[data-sort-key]');
+      const parseTimeToMinutes = (text) => {
+        const match = text.match(/(\d{1,2}):(\d{2})/);
+        if (!match) return null;
+        const hours = parseInt(match[1], 10);
+        const minutes = parseInt(match[2], 10);
+        return (hours * 60) + minutes;
+      };
+
+      const normalizeValue = (row, key, index) => {
+        const text = (row.cells[index]?.textContent || '').trim();
+        switch (key) {
+          case 'habitacion':
+            return parseInt(text.replace(/\D+/g, ''), 10) || 0;
+          case 'turno':
+            return text.toLowerCase();
+          case 'inicio':
+          case 'fin': {
+            const t = parseTimeToMinutes(text);
+            return (t !== null) ? t : Number.POSITIVE_INFINITY;
+          }
+          case 'minutos':
+            return parseInt(text.replace(/\D+/g, ''), 10) || 0;
+          case 'nota':
+            return text.toLowerCase();
+          default:
+            return text.toLowerCase();
+        }
+      };
+
+      let sortState = { key: null, direction: null };
+
+      const updateIndicators = () => {
+        headers.forEach((th) => {
+          if (th.dataset.sortKey === sortState.key) {
+            th.setAttribute('data-sort-direction', sortState.direction);
+          } else {
+            th.removeAttribute('data-sort-direction');
+          }
+        });
+      };
+
+      const sortRows = (key, index) => {
+        const nextDirection = (sortState.key === key && sortState.direction === 'asc') ? 'desc' : 'asc';
+        sortState = { key, direction: nextDirection };
+
+        const rows = Array.from(tbody.querySelectorAll('tr'));
+        rows.sort((a, b) => {
+          const aVal = normalizeValue(a, key, index);
+          const bVal = normalizeValue(b, key, index);
+
+          let compare;
+          if (typeof aVal === 'number' && typeof bVal === 'number') {
+            compare = aVal - bVal;
+          } else {
+            compare = String(aVal).localeCompare(String(bVal), 'es', { sensitivity: 'base' });
+          }
+
+          return nextDirection === 'asc' ? compare : -compare;
+        });
+
+        tbody.innerHTML = '';
+        rows.forEach((row) => tbody.appendChild(row));
+        updateIndicators();
+      };
+
+      headers.forEach((th, index) => {
+        th.addEventListener('click', () => sortRows(th.dataset.sortKey, index));
+        th.title = 'Ordenar';
+      });
+    })();
+  </script>
+
   <a href="?view=panel" style="display:block;margin-top:10px;color:#0B5FFF;text-decoration:none;">⬅ Volver al panel</a>
 </main>
 <?php endif; ?>
