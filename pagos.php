@@ -309,10 +309,11 @@ function finalizarReserva($conn,$payload,$row){
   $fecha = argDateToday();
   $tipoHab = categoriaLabel($categoria);
   $precio = (int)round($row['monto'] ?? 0);
+  $estado = 'reservada';
 
   $ins=$conn->prepare("INSERT INTO historial_habitaciones (habitacion,tipo,estado,turno,hora_inicio,fecha_registro,precio_aplicado,es_extra,bloques,codigo)
                        VALUES (?,?,?,?,?,?,?,0,?,?)");
-  $ins->bind_param('isssssisss',$habitacion,$tipoHab,$estado='reservada',$turnoTag,$horaInicioUTC,$fecha,$precio,$bloques,$codigo);
+  $ins->bind_param('isssssiis',$habitacion,$tipoHab,$estado,$turnoTag,$horaInicioUTC,$fecha,$precio,$bloques,$codigo);
   $ins->execute(); $ins->close();
 
   $st=$conn->prepare("UPDATE habitaciones SET estado='reservada', tipo_turno=?, hora_inicio=?, codigo_reserva=? WHERE id=?");
