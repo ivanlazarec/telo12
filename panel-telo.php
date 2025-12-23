@@ -257,7 +257,22 @@ function fmtFechaArg($utc){
   return $dt ? $dt->format('d/m/Y') : '';
 }
 
-
+function turnoLabelCorto($turno){
+  if($turno==='turno-2h') return 'Turno 2h';
+  if($turno==='turno-3h') return 'Turno 3h';
+  if($turno==='noche') return 'Noche';
+  if($turno==='noche-finde' || $turno==='noche-find') return 'Noche finde';
+  return ucfirst($turno);
+}
+function proximaExtra($conn,$habitacion,$horaInicio){
+  $st = $conn->prepare("SELECT turno, hora_inicio FROM historial_habitaciones WHERE habitacion=? AND hora_inicio > ? AND es_extra=1 ORDER BY hora_inicio ASC LIMIT 1");
+  $st->bind_param('is',$habitacion,$horaInicio);
+  $st->execute();
+  $row = $st->get_result()->fetch_assoc();
+  $st->close();
+  if(!$row){ return [null,null]; }
+  return [toArgTs($row['hora_inicio']), $row['turno'] ?? null];
+}
 // Turno Noche: 21:00 → 10:00 todos los días
 function nightEndTsFromStartArg($startTs){
   $dt = new DateTime('@'.$startTs); $dt->setTimezone(new DateTimeZone('America/Argentina/Buenos_Aires'));
@@ -1460,7 +1475,17 @@ html, body { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grays
   padding-left: 12px;
   text-align: left;
 }
-
+.minutos-alerta{
+  color:#b91c1c;
+  font-weight:700;
+}
+.fila-alerta{
+  background:#fef2f2;
+}
+.nota-extra{
+  color:#0b5fff;
+  font-weight:600;
+}
 /* ======== MODO TARJETAS EN CELULAR ======== */
 @media (max-width: 768px) {
   /* Oculta la tabla y genera tarjetas desde el DOM */
@@ -1549,6 +1574,7 @@ html, body { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grays
     <div class="nav">
         <button class="<?php echo ($view==='panel'?'active':''); ?>" onclick="location.href='?view=panel'">Panel</button>
         <button class="<?php echo ($view==='reportes'?'active':''); ?>" onclick="location.href='?view=reportes'">Reportes</button>
+        <button class="<?php echo ($view==='reportes-empleadas'?'active':''); ?>" onclick="location.href='?view=reportes-empleadas'">Reporte empleadas</button>
         <button onclick="window.open('https://lamoradatandil.com/inventario.php', '_blank')">Inventario</button>
         <button class="<?php echo ($view==='valores'?'active':''); ?>" onclick="location.href='?view=valores'">Editar valores</button>
       <div class="clock" id="arg-clock">--:--:--</div>
@@ -1560,6 +1586,7 @@ html, body { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grays
 <div id="mobile-menu">
   <button onclick="location.href='?view=panel'">Panel</button>
   <button onclick="location.href='?view=valores'">Editar valores</button>
+  <button onclick="location.href='?view=reportes-empleadas'">Reporte empleadas</button>
   <button onclick="location.href='?view=reportes'">Reportes</button>
   <button onclick="window.open('https://lamoradatandil.com/inventario.php','_blank')">Inventario</button>
 </div>
@@ -1570,6 +1597,99 @@ document.getElementById('menu-toggle').addEventListener('click', function(){
   menu.style.display = (menu.style.display === 'block') ? 'none' : 'block';
 });
 </script>
+<?php if($view==='reportes-empleadas'): ?>
+<?php
+$fechaFiltro = preg_replace('/[^0-9\\-]/','', $_GET['fecha'] ?? argDateToday());
+if($fechaFiltro===''){ $fechaFiltro = argDateToday(); }
+
+$st = $conn->prepare("SELECT id, habitacion, turno, hora_inicio, hora_fin, duracion_minutos, es_extra, bloques FROM historial_habitaciones WHERE fecha_registro=? ORDER BY habitacion ASC, hora_inicio ASC");
+$st->bind_param('s',$fechaFiltro);
+$st->execute();
+$res = $st->get_result();
+$reporteEmpleadas = [];
+$nowTs = nowArgDT()->getTimestamp();
+while($r=$res->fetch_assoc()){
+  $inicioTs = toArgTs($r['hora_inicio']);
+  $esperadoFinTs = $inicioTs!==null ? turnoEndArgTs($r['turno'], $inicioTs, $r['bloques'] ?? 1) : null;
+  $finTs = $r['hora_fin'] ? toArgTs($r['hora_fin']) : $nowTs;
+  $minutos = ($r['duracion_minutos'] !== null) ? (int)$r['duracion_minutos'] : (($inicioTs!==null && $finTs!==null) ? max(0, (int)round(($finTs - $inicioTs) / 60)) : 0);
+
+  list($proximaExtraTs,$proximaExtraTurno) = proximaExtra($conn,(int)$r['habitacion'],$r['hora_inicio']);
+  $tieneExtra = $proximaExtraTs !== null && ($esperadoFinTs === null || $proximaExtraTs <= $esperadoFinTs + 10800);
+
+  $nota = '';
+  if((int)$r['es_extra'] === 1){
+    $nota = 'Turno extra / reactivado';
+  } elseif($tieneExtra){
+    $nota = 'Extendido con turno extra'.($proximaExtraTurno ? ' ('.turnoLabelCorto($proximaExtraTurno).')' : '');
+  }
+
+  $alerta = false;
+  if($esperadoFinTs!==null){
+    if(in_array($r['turno'], ['turno-2h','turno-3h'], true)){
+      $alerta = !$tieneExtra && ($finTs > $esperadoFinTs + (15 * 60));
+    } elseif(in_array($r['turno'], ['noche','noche-finde','noche-find'], true)){
+      $abierta = empty($r['hora_fin']);
+      $alerta = !$tieneExtra && (($abierta && $nowTs > $esperadoFinTs) || (!$abierta && $finTs > $esperadoFinTs));
+    }
+  }
+
+  $reporteEmpleadas[] = [
+    'habitacion'=>(int)$r['habitacion'],
+    'turno'=>turnoLabelCorto($r['turno']),
+    'inicio'=>fmtHoraArg($r['hora_inicio']),
+    'fin'=>$r['hora_fin'] ? fmtHoraArg($r['hora_fin']) : 'En curso',
+    'minutos'=>$minutos,
+    'nota'=>$nota,
+    'alerta'=>$alerta
+  ];
+}
+$st->close();
+?>
+<main class="container">
+  <div class="card" style="margin-top:20px;">
+    <h2 style="margin-top:0">📝 Reporte diario para empleadas</h2>
+    <p style="color:#4b5563;">Turnos registrados en la fecha seleccionada. Los minutos se remarcan en rojo solo si superan el límite sin un turno extra o reactivación posterior.</p>
+    <form method="get" style="display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end; margin-bottom:12px;">
+      <input type="hidden" name="view" value="reportes-empleadas">
+      <label>Fecha
+        <input type="date" name="fecha" value="<?= safe($fechaFiltro) ?>">
+      </label>
+      <button type="submit">Ver reporte</button>
+    </form>
+
+    <div class="table-container">
+      <table class="table">
+        <thead>
+          <tr>
+            <th>Habitación</th>
+            <th>Turno</th>
+            <th>Inicio</th>
+            <th>Fin</th>
+            <th>Minutos</th>
+            <th>Nota</th>
+          </tr>
+        </thead>
+        <tbody>
+          <?php if(empty($reporteEmpleadas)): ?>
+            <tr><td colspan="6" style="text-align:center;padding:10px;color:#6b7280;">Sin movimientos para esta fecha.</td></tr>
+          <?php else: foreach($reporteEmpleadas as $row): ?>
+            <tr class="<?= $row['alerta'] ? 'fila-alerta' : '' ?>">
+              <td>Hab. <?= $row['habitacion'] ?></td>
+              <td><?= safe($row['turno']) ?></td>
+              <td><?= safe($row['inicio']) ?></td>
+              <td><?= safe($row['fin']) ?></td>
+              <td><span class="<?= $row['alerta'] ? 'minutos-alerta' : '' ?>"><?= (int)$row['minutos'] ?> min</span></td>
+              <td><?= $row['nota'] ? '<span class="nota-extra">'.safe($row['nota']).'</span>' : '-' ?></td>
+            </tr>
+          <?php endforeach; endif; ?>
+        </tbody>
+      </table>
+    </div>
+  </div>
+  <a href="?view=panel" style="display:block;margin-top:10px;color:#0B5FFF;text-decoration:none;">⬅ Volver al panel</a>
+</main>
+<?php endif; ?>
 
 <?php if($view==='valores'): ?>
 
@@ -1719,6 +1839,7 @@ $sql .= " ORDER BY inicio DESC";
 $res = $conn->query($sql);
 $rows = [];
 while($r = $res->fetch_assoc()) { $rows[] = $r; }
+
 // Preparar reportes con movimientos calculados (una sola vez)
 $reportes = [];
 foreach ($rows as $r) {
