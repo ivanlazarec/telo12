@@ -3,7 +3,8 @@ error_reporting(E_ALL);
 ini_set('display_errors', 1);
 header('Content-Type: text/html; charset=utf-8');
 
-$HOTEL_ADDRESS   = "La Morada Tandil — dirección disponible en recepción (actualizá \$HOTEL_ADDRESS en pagos.php)";
+$HOTEL_ADDRESS   = "La Morada Tandil — La Pampa 931, Tandil";
+$HOTEL_MAP_LINK  = "https://maps.app.goo.gl/TdDNFWW5nGRLRVq47";
 $MP_ACCESS_TOKEN = "APP_USR-4518252275853191-112421-370721fbc465852fcb25cc7cba42e681-59176727";
 
 if (class_exists('MercadoPago\\SDK')) {
@@ -601,6 +602,12 @@ if($tokenRet){
     .muted{color:var(--muted);}
     .tag{padding:4px 8px;border-radius:8px;background:rgba(255,255,255,0.05);font-size:12px;}
     .divider{height:1px;background:var(--border);margin:12px 0;}
+    .checkbox-row{display:flex;gap:8px;align-items:flex-start;margin:12px 0;}
+    .checkbox-row input[type=checkbox]{margin:2px 0 0;}
+    .checkbox-row span{line-height:1.4;}
+    .map-link{color:var(--accent2);text-decoration:none;font-weight:700;}
+    .map-link:hover{text-decoration:underline;}
+    .map-link-cta{display:inline-flex;gap:6px;align-items:center;margin-top:10px;}
     @media(max-width:600px){
       header{position:static;}
       .tabs button{flex:1 1 45%;justify-content:center;}
@@ -618,6 +625,7 @@ if($tokenRet){
       <button class="tab-btn" data-tab="extra">Turno extra</button>
       <button class="tab-btn" data-tab="servicio">Servicio al cuarto</button>
     </div>
+    <a class="map-link map-link-cta" href="<?= htmlspecialchars($HOTEL_MAP_LINK) ?>" target="_blank" rel="noopener">📍 Ver mapa</a>
   </header>
   <main>
     <?php if($feedback): ?>
@@ -635,7 +643,7 @@ if($tokenRet){
             <?php if(!empty($feedback['monto'])): ?>
               <p>Total abonado: $ <?= number_format((float)$feedback['monto'],0,',','.') ?></p>
             <?php endif; ?>
-            <p>Dirección del hotel: <?= htmlspecialchars($HOTEL_ADDRESS) ?></p>
+            <p>Dirección del hotel: <?= htmlspecialchars($HOTEL_ADDRESS) ?> — <a class="map-link" href="<?= htmlspecialchars($HOTEL_MAP_LINK) ?>" target="_blank" rel="noopener">Ver mapa</a></p>
             <div id="timer-line" style="margin-top:10px; font-weight:700;"></div>
           </div>
         <?php else: ?>
@@ -687,8 +695,7 @@ if($tokenRet){
       </div>
       <div class="divider"></div>
       <div class="alert">Precios vigentes se calculan al momento del pago. El turno noche solo está disponible de 21:00 a 10:00.</div>
-      <label style="display:flex;gap:8px;align-items:center;margin:12px 0;">
-        <input type="checkbox" id="res-acepta"> <span>Entiendo que el reloj comienza a correr una vez que pago.</span>
+      <label class="checkbox-row"> <input type="checkbox" id="res-acepta"> <span>Entiendo que el reloj comienza a correr una vez que pago.</span>
       </label>
       <div id="res-total" class="pill">Total estimado: $ --</div>
       <div style="margin-top:12px;">
