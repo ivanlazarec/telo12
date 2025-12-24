@@ -501,6 +501,7 @@ function cajaDetalleDesdeHasta($conn,$inicioUTC,$finUTC=null,$limit=150){
         CONVERT(h.turno USING utf8mb4) COLLATE $col AS turno,
         h.hora_inicio,
         h.precio_aplicado AS monto,
+        h.es_extra,
         'hab' COLLATE $col AS tipo,
         NULL AS nombre,
         COALESCE(cm.cobrado, 0) AS cobrado
@@ -514,6 +515,7 @@ function cajaDetalleDesdeHasta($conn,$inicioUTC,$finUTC=null,$limit=150){
         CONVERT(v.turno USING utf8mb4) COLLATE $col AS turno,
         v.hora AS hora_inicio,
         v.precio AS monto,
+        0 AS es_extra,
         'venta' COLLATE $col AS tipo,
          CONVERT(v.nombre USING utf8mb4) COLLATE $col AS nombre,
         COALESCE(cm.cobrado, 0) AS cobrado
@@ -536,17 +538,20 @@ function cajaDetalleDesdeHasta($conn,$inicioUTC,$finUTC=null,$limit=150){
   while($r=$res->fetch_assoc()){
        $label = '';
     if($r['tipo']==='hab')      $label = (int)$r['habitacion'];
-    elseif($r['tipo']==='venta') $label = '🧃 '.$r['nombre'];
-    else                         $label = '💳 Hab. '.($r['habitacion'] ?? '-');
+       elseif($r['tipo']==='venta') $label = '🧃 '.$r['nombre'];
+       else                         $label = '💳 Hab. '.($r['habitacion'] ?? '-');
     
     $rows[] = [
       'id'    => (int)$r['id'],               // ID real del movimiento
       'tipo'  => $r['tipo'],                  // 'hab', 'venta' o 'ajuste'
+      'habitacion' => $r['habitacion'] ? (int)$r['habitacion'] : null,
       'hab'   => $label,
       'turno' => $r['turno'],
       'inicio'=> fmtHoraArg($r['hora_inicio']),
+      'hora_inicio_raw' => $r['hora_inicio'],
       'monto' => (int)($r['monto']??0),
       'cobrado' => (int)($r['cobrado'] ?? 0),
+      'es_extra' => (int)($r['es_extra'] ?? 0),
     ];
   }
   $st->close();
@@ -596,34 +601,121 @@ function digitalTotalDesdeHasta($conn,$inicioUTC,$finUTC=null){
   $st->close();
   return (float)($res['total'] ?? 0);
 }
+function calcularAjustesDigitales($detalle,$movsDigital){
+  $ajustes = [];
+  $ajusteTotal = 0.0;
+
+  foreach($movsDigital as $d){
+    if(($d['tipo'] ?? '') !== 'envio') continue;
+    $hab = $d['habitacion'] ?? null;
+    if(!$hab) continue;
+    $dTs = toArgTs($d['created_at'] ?? '');
+    if($dTs === null) continue;
+
+    $mejor = null;
+    foreach($detalle as $idx=>$m){
+      if(($m['tipo'] ?? '') !== 'hab') continue;
+      if((int)($m['habitacion'] ?? 0) !== (int)$hab) continue;
+      $startTs = toArgTs($m['hora_inicio_raw'] ?? '');
+      if($startTs === null) continue;
+      $ventana = ((int)($m['es_extra'] ?? 0) === 1) ? 300 : 900; // 5 min extras, 15 min ocupación normal
+      $diff = abs($dTs - $startTs);
+      if($diff > $ventana) continue;
+
+      if($mejor === null || $diff < $mejor['diff'] || ($ventana === 300 && $mejor['ventana'] !== 300)){
+        $mejor = ['idx'=>$idx,'diff'=>$diff,'ventana'=>$ventana];
+      }
+    }
+
+if($mejor){
+      $montoNeg = -1 * (float)$d['monto'];
+      $ajusteTotal += $montoNeg;
+      $ajustes[] = [
+        'id' => $d['id'],
+        'tipo' => 'ajuste_digital',
+        'habitacion' => (int)$hab,
+        'hab' => '💳 Ajuste Hab. '.$hab,
+        'turno' => $detalle[$mejor['idx']]['turno'] ?? '',
+        'inicio' => fmtHoraArg($d['created_at']),
+        'hora_inicio_raw' => $d['created_at'],
+        'monto' => (int)round($montoNeg),
+        'cobrado' => 1,
+        'es_extra' => 0
+      ];
+    }
+  }
+
+  return [$ajustes, $ajusteTotal];
+}
+
+function movimientosCajaConReglas($conn,$inicioUTC,$finUTC=null,$limit=300,$opts=[]){
+  $opts = array_merge([
+    'minibar_en_caja' => true,
+    'incluir_movs_digitales' => false,
+    'sumar_digital_en_total' => true
+  ], $opts);
+
+  $detalle = cajaDetalleDesdeHasta($conn,$inicioUTC,$finUTC,$limit);
+  $cantHab = 0;
+  foreach($detalle as &$m){
+    if(($m['tipo'] ?? '') === 'hab'){ $cantHab++; }
+    if(!$opts['minibar_en_caja'] && ($m['tipo'] ?? '') === 'venta'){
+      $m['monto'] = 0;
+    }
+  }
+  unset($m);
+
+  $movsDigital = digitalIngresosDesdeHasta($conn, $inicioUTC, $finUTC, $limit);
+  list($ajustesDigitales,) = calcularAjustesDigitales($detalle,$movsDigital);
+  $detalle = array_merge($detalle, $ajustesDigitales);
+
+  $digitalRows = [];
+  $digitalTotal = 0.0;
+  foreach($movsDigital as $d){
+    $digitalTotal += (float)$d['monto'];
+    if($opts['incluir_movs_digitales']){
+      $digitalRows[] = [
+        'id' => $d['id'],
+        'tipo' => 'digital',
+        'habitacion' => $d['habitacion'] ? (int)$d['habitacion'] : null,
+        'hab' => $d['habitacion'] ? ('Hab. '.$d['habitacion']) : ($d['tipo'] ?: 'Ingreso digital'),
+        'turno' => $d['tipo'] ?? '',
+        'inicio' => fmtHoraArg($d['created_at']),
+        'hora_inicio_raw' => $d['created_at'],
+        'monto' => (int)round($d['monto']),
+        'descripcion' => $d['descripcion'] ?? '',
+        'codigo' => $d['codigo'] ?? '',
+        'cobrado' => 1,
+        'es_extra' => 0
+      ];
+    }
+  }
+  $detalle = array_merge($detalle, $digitalRows);
+
+  usort($detalle, function($a,$b){
+    return strcmp($a['inicio'] ?? '', $b['inicio'] ?? '');
+  });
+
+$totalCaja = 0;
+  foreach($detalle as $m){
+    if(($m['tipo'] ?? '') === 'digital' && !$opts['sumar_digital_en_total']){ continue; }
+    $totalCaja += (int)($m['monto'] ?? 0);
+  }
+
+  return [$detalle, $totalCaja, $digitalTotal, $cantHab];
+}
 /* =================== AJAX de Turno de Caja =================== */
 
 if ($_SERVER['REQUEST_METHOD']==='GET' && isset($_GET['ajax_turno']) && $_GET['ajax_turno']=='1'){
   $cur = turnoActual($conn);
 
   $inicioArg = fmtHoraArg($cur['inicio']);
-
-list($totalBase,) = cajaTotalDesdeHasta($conn, $cur['inicio']);
-  $detalle = cajaDetalleDesdeHasta($conn, $cur['inicio'], null, 300);
   
-  $movsDigital = digitalIngresosDesdeHasta($conn, $cur['inicio'], null, 300);
-  $digitalTotal = 0;
-  foreach($movsDigital as $d){
-    $digitalTotal += (float)$d['monto'];
-    $detalle[] = [
-      'id' => $d['id'],
-      'tipo' => 'digital',
-      'hab' => $d['habitacion'] ? ('💳 Hab. '.$d['habitacion']) : ('💳 '.($d['tipo'] ?: 'Ingreso digital')),
-      'inicio' => fmtHoraArg($d['created_at']),
-      'monto' => (int)round($d['monto']),
-      'cobrado' => 1
-    ];
-  }
-  usort($detalle, function($a,$b){
-    return strcmp($a['inicio'] ?? '', $b['inicio'] ?? '');
-  });
-
-  $total = $totalBase + $digitalTotal;
+  list($detalle, $total,) = movimientosCajaConReglas($conn, $cur['inicio'], null, 300, [
+    'minibar_en_caja' => false,
+    'incluir_movs_digitales' => false,
+    'sumar_digital_en_total' => false
+  ]);
 
 
   echo json_encode([
@@ -632,7 +724,7 @@ list($totalBase,) = cajaTotalDesdeHasta($conn, $cur['inicio']);
     'turno_txt' => turnoNombre($cur['turno']),
     'inicio_arg' => $inicioArg,
     'total' => $total,
-    'digital_total' => $digitalTotal,
+    'digital_total' => 0,
     'detalle' => $detalle
   ]);
   exit;
@@ -1061,8 +1153,11 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion']) && $_POST['ac
   $ahoraUTC = nowUTCStrFromArg();
 
   // Resumen del turno que se cierra
-  list($total,$cant) = cajaTotalDesdeHasta($conn,$cur['inicio'],$ahoraUTC);
-  $detalle = cajaDetalleDesdeHasta($conn,$cur['inicio'],$ahoraUTC,150);
+  list($detalle,$total,, $cant) = movimientosCajaConReglas($conn,$cur['inicio'],$ahoraUTC,150,[
+    'minibar_en_caja' => false,
+    'incluir_movs_digitales' => false,
+    'sumar_digital_en_total' => false
+  ]);
 
   // Guardar cierre en historial_turnos
   $st = $conn->prepare("INSERT INTO historial_turnos (turno,inicio,fin,total,ocupaciones) VALUES (?,?,?,?,?)");
@@ -2087,31 +2182,14 @@ $reportes = [];
 foreach ($rows as $r) {
     $inicioTurno = $r['inicio'];
     $finTurno = $r['fin'] ?? $r['inicio'];
-    $movsBase = cajaDetalleDesdeHasta($conn, $inicioTurno, $finTurno, 500);
-    $movsDigital = digitalIngresosDesdeHasta($conn, $inicioTurno, $finTurno, 500);
-    $movs = $movsBase;
-
-    $digitalTotal = 0;
-    foreach($movsDigital as $d){
-        $digitalTotal += (float)$d['monto'];
-        $movs[] = [
-          'id'    => $d['id'],
-          'tipo'  => 'digital',
-          'hab'   => $d['habitacion'] ? ('Hab. '.$d['habitacion']) : ($d['tipo'] ?: 'Ingreso digital'),
-          'turno' => $d['tipo'] ?? '',
-          'inicio'=> fmtHoraArg($d['created_at']),
-          'monto' => (int)round($d['monto']),
-          'descripcion' => $d['descripcion'] ?? '',
-          'codigo' => $d['codigo'] ?? ''
-        ];
-    }
-
-    usort($movs, function($a,$b){
-      return strcmp($a['inicio'] ?? '', $b['inicio'] ?? '');
-    });
+    list($movs, $totalTurno, $digitalTotal,) = movimientosCajaConReglas($conn, $inicioTurno, $finTurno, 500, [
+      'minibar_en_caja' => true,
+      'incluir_movs_digitales' => true,
+      'sumar_digital_en_total' => true
+    ]);
     $reportes[] = [
         'data' => array_merge($r, [
-          'total_con_digital' => (int)$r['total'] + (int)round($digitalTotal),
+          'total_con_digital' => (int)$totalTurno,
           'digital_total' => $digitalTotal
         ]),
         'movs' => $movs
