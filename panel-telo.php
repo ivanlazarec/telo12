@@ -904,7 +904,7 @@ if($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion'])){
     }
     echo json_encode(['success'=>true]); exit;
   }
-if ($accion === 'mover_reserva') {
+    if ($accion === 'mover_reserva') {
     $desde = intval($_POST['desde'] ?? 0);
     $hasta = intval($_POST['hasta'] ?? 0);
 
@@ -931,23 +931,91 @@ if ($accion === 'mover_reserva') {
       exit;
     }
 
-    $q = $conn->prepare("SELECT estado FROM habitaciones WHERE id=?");
+    $reservaSt = $conn->prepare("SELECT id, turno, hora_inicio, bloques, precio_aplicado, es_extra, codigo, tipo FROM historial_habitaciones WHERE habitacion=? AND estado='reservada' AND hora_fin IS NULL ORDER BY id DESC LIMIT 1");
+    $reservaSt->bind_param('i', $desde);
+    $reservaSt->execute();
+    $reserva = $reservaSt->get_result()->fetch_assoc();
+    $reservaSt->close();
+
+    if(!$reserva){
+      echo json_encode(['success'=>false,'error'=>'No se encontró la reserva abierta']);
+      exit;
+    }
+
+    $codigo = $reserva['codigo'] ?? ($orig['codigo_reserva'] ?? null);
+    $turnoReserva = $reserva['turno'] ?? null;
+    $bloquesReserva = max(1, intval($reserva['bloques'] ?? 1));
+    $precioReserva = (int)($reserva['precio_aplicado'] ?? 0);
+    $esExtraReserva = (int)($reserva['es_extra'] ?? 0);
+    if(!$turnoReserva){
+      echo json_encode(['success'=>false,'error'=>'La reserva no tiene turno asignado']);
+      exit;
+    }
+
+    $q = $conn->prepare("SELECT estado, tipo_turno, hora_inicio FROM habitaciones WHERE id=?");
     $q->bind_param('i', $hasta);
     $q->execute();
     $dest = $q->get_result()->fetch_assoc();
     $q->close();
 
-    if (($dest['estado'] ?? '') !== 'libre') {
+    $estadoDest = $dest['estado'] ?? 'libre';
+    $estadoReserva = 'reservada';
+    $startReservaTs = toArgTs($reserva['hora_inicio'] ?? null);
+    $nowArgTs = nowArgDT()->getTimestamp();
+    $inicioReservaUTC = $reserva['hora_inicio'] ?? nowUTCStrFromArg();
+    $fechaRegistro = $startReservaTs ? argDateFromTs($startReservaTs) : argDateToday();
+    $horasExtra = 0;
+
+    if($estadoDest === 'ocupada' || $estadoDest === 'reservada'){
+      $open = $conn->prepare("SELECT id, turno, hora_inicio, bloques FROM historial_habitaciones WHERE habitacion=? AND hora_fin IS NULL ORDER BY id DESC LIMIT 1");
+      $open->bind_param('i',$hasta);
+      $open->execute();
+      $curOpen = $open->get_result()->fetch_assoc();
+      $open->close();
+
+      $closeStartTs = toArgTs($curOpen['hora_inicio'] ?? null);
+      $closeEndTs = turnoEndArgTs($curOpen['turno'] ?? '', $closeStartTs, $curOpen['bloques'] ?? 1);
+      $closeEndTs = $closeEndTs ?? $nowArgTs;
+      $endUTC = gmdate('Y-m-d H:i:s', $closeEndTs);
+      $mins = ($closeStartTs!==null)
+        ? max(0, intval(round(($closeEndTs - $closeStartTs) / 60)))
+        : 0;
+
+      if(!empty($curOpen['id'])){
+        $close = $conn->prepare("UPDATE historial_habitaciones SET hora_fin=?, duracion_minutos=? WHERE id=?");
+        $close->bind_param('sii',$endUTC,$mins,$curOpen['id']);
+        $close->execute();
+        $close->close();
+      }
+
+      $startReservaTs = max($closeEndTs, $nowArgTs);
+      $inicioReservaUTC = gmdate('Y-m-d H:i:s', $startReservaTs);
+      $fechaRegistro = argDateFromTs($startReservaTs);
+      $estadoReserva = 'ocupada';
+    } elseif($estadoDest === 'limpieza'){
+      $startReservaTs = $nowArgTs;
+      $inicioReservaUTC = gmdate('Y-m-d H:i:s', $startReservaTs);
+      $fechaRegistro = argDateFromTs($startReservaTs);
+      $estadoReserva = 'ocupada';
+    } elseif($estadoDest === 'libre'){
+      $estadoReserva = 'reservada';
+    } else {
       echo json_encode(['success' => false, 'error' => 'La habitación destino no está disponible']);
       exit;
     }
 
-    $turno = $orig['tipo_turno'] ?? null;
-    $horaInicio = $orig['hora_inicio'] ?? null;
-    $codigo = $orig['codigo_reserva'] ?? null;
+    if($turnoReserva==='turno-2h') $horasExtra = 2 * $bloquesReserva;
+    elseif($turnoReserva==='turno-3h') $horasExtra = 3 * $bloquesReserva;
 
-    $upDest = $conn->prepare("UPDATE habitaciones SET estado='reservada', tipo_turno=?, hora_inicio=?, codigo_reserva=? WHERE id=?");
-    $upDest->bind_param('sssi', $turno, $horaInicio, $codigo, $hasta);
+    $updHist = $conn->prepare("UPDATE historial_habitaciones SET habitacion=?, tipo=?, estado=?, turno=?, hora_inicio=?, fecha_registro=?, codigo=?, bloques=?, hora_fin=NULL, duracion_minutos=NULL, precio_aplicado=?, es_extra=? WHERE id=?");
+    $updHist->bind_param('issssssiiii', $hasta, $tipoDesde, $estadoReserva, $turnoReserva, $inicioReservaUTC, $fechaRegistro, $codigo, $bloquesReserva, $precioReserva, $esExtraReserva, $reserva['id']);
+    $updHist->execute();
+    $updHist->close();
+
+
+    $nuevoEstado = $estadoReserva === 'ocupada' ? 'ocupada' : 'reservada';
+    $upDest = $conn->prepare("UPDATE habitaciones SET estado=?, tipo_turno=?, hora_inicio=?, codigo_reserva=? WHERE id=?");
+    $upDest->bind_param('ssssi', $nuevoEstado, $turnoReserva, $inicioReservaUTC, $codigo, $hasta);
     $upDest->execute();
     $upDest->close();
 
@@ -956,12 +1024,7 @@ if ($accion === 'mover_reserva') {
     $upOrig->execute();
     $upOrig->close();
 
-    $updHist = $conn->prepare("UPDATE historial_habitaciones SET habitacion=?, tipo=?, codigo=? WHERE habitacion=? AND hora_fin IS NULL AND estado='reservada'");
-    $updHist->bind_param('issi', $hasta, $tipoDesde, $codigo, $desde);
-    $updHist->execute();
-    $updHist->close();
-
-    echo json_encode(['success' => true]);
+    echo json_encode(['success' => true, 'destino' => $nuevoEstado, 'horas' => $horasExtra, 'turno' => $turnoReserva]);
     exit;
   }
  if($accion==='ocupar_turno'){ // agregar bloque (acumulable)
@@ -2976,7 +3039,7 @@ document.addEventListener('click', async (e)=>{
     return;
   }
 
-  if(estado==='reservada'){
+    if(estado==='reservada'){
     try {
       const res = await fetch(`obtener-codigo.php?id=${id}`);
       let j = {}; try { j = await res.json(); } catch(e) {}
@@ -2999,23 +3062,29 @@ const tipo = card.dataset.tipo || '';
       });
       if(!action) return;
 if(action==='mover'){
-        const libresMismoTipo = Array.from(document.querySelectorAll('.room-card.libre'))
-          .filter(r => (r.dataset.tipo || '') === tipo)
+        const mismas = Array.from(document.querySelectorAll('.room-card'))
+          .filter(r => (r.dataset.tipo || '') === tipo && parseInt(r.dataset.id,10)!==id)
           .sort((a,b)=>parseInt(a.dataset.id,10)-parseInt(b.dataset.id,10));
 
-        if(!libresMismoTipo.length){
-          Swal.fire({icon:'info',title:'Sin habitaciones disponibles',text:'No hay habitaciones libres de la misma categoría.'});
+        if(!mismas.length){
+          Swal.fire({icon:'info',title:'Sin habitaciones disponibles',text:'No hay habitaciones de la misma categoría.'});
           return;
         }
 
         const opciones = {};
-        libresMismoTipo.forEach(r => { opciones[r.dataset.id] = `Hab. ${r.dataset.id}`; });
+        mismas.forEach(r => {
+          const hid = r.dataset.id;
+          const estadoTxt = r.classList.contains('ocupada') ? 'Ocupada' :
+                            r.classList.contains('reservada') ? 'Reservada' :
+                            r.classList.contains('limpieza') ? 'Limpieza' : 'Libre';
+          opciones[hid] = `Hab. ${hid} — ${estadoTxt}`;
+        });
 
         const { value: nuevaHab } = await Swal.fire({
           title:`Mover reserva (Hab. ${id})`,
           input:'select',
           inputOptions: opciones,
-          inputPlaceholder:'Elegí habitación libre',
+          inputPlaceholder:'Elegí habitación',
           showCancelButton:true,
           confirmButtonText:'Mover'
         });
@@ -3024,7 +3093,8 @@ if(action==='mover'){
 
         const mov = await moverReserva(id, parseInt(nuevaHab,10));
         if(mov.ok){
-          Swal.fire({icon:'success',title:'Reserva movida',text:`Asignada a la habitación ${nuevaHab}.`});
+          const extraTxt = mov.destino==='ocupada' && mov.horas ? ` (+${mov.horas} h)` : '';
+          Swal.fire({icon:'success',title:'Reserva movida',text:`Asignada a la habitación ${nuevaHab}${extraTxt}.`});
         } else {
           Swal.fire({icon:'error',title:'No se pudo mover',text: mov.error || 'Intentalo de nuevo.'});
         }
@@ -3133,7 +3203,7 @@ async function moverReserva(desde, hasta){
       body:new URLSearchParams({accion:'mover_reserva',desde,hasta})
     });
     const txt = await res.text(); let j={}; try{ j=JSON.parse(txt);}catch(_){}
-    if(j && j.success===true){ await pollUpdates(true); return {ok:true}; }
+    if(j && j.success===true){ await pollUpdates(true); return {ok:true, destino:j.destino, horas:j.horas}; }
     await pollUpdates(true);
     return {ok:false, error:(j && j.error)||'No se pudo mover la reserva'};
   }catch(e){ await pollUpdates(true); return {ok:false, error:'No se pudo mover la reserva'}; }

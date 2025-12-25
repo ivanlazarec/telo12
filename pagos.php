@@ -49,6 +49,9 @@ function turnoEndArgTs($turno,$startArgTs,$bloques=1){
     }
     return $startArgTs;
 }
+function endArgTsConAjuste($turno,$startArgTs,$bloques=1,$ajusteSegundos=0){
+  return turnoEndArgTs($turno,$startArgTs,$bloques) + (int)$ajusteSegundos;
+}
 function argNowInfo(){ $dt=nowArgDT(); return [(int)$dt->format('w'), (int)$dt->format('G')]; } // 0=Dom..6=Sab
 function isTwoHourWindowNow(int $dow, int $hour){
   return ($dow===5 && $hour>=8) || $dow===6 || $dow===0; // Vie 8am → Dom 23:59
@@ -232,7 +235,7 @@ function extenderTurnoDesdePago($conn,$habitacion,$bloques,$turnoTag,$monto,$ref
   $blockHours = ($turnoTag==='turno-2h') ? 2 : 3;
   $nowUTC = nowUTCStrFromArg();
   $tipoHab = tipoDeHabitacion($habitacion, $GLOBALS['SUPER_VIP'], $GLOBALS['VIP_LIST']);
-  $open = $conn->prepare("SELECT id, turno, hora_inicio, bloques FROM historial_habitaciones WHERE habitacion=? AND hora_fin IS NULL ORDER BY id DESC LIMIT 1");
+  $open = $conn->prepare("SELECT id, turno, hora_inicio, bloques, ajuste_segundos FROM historial_habitaciones WHERE habitacion=? AND hora_fin IS NULL ORDER BY id DESC LIMIT 1");
   $open->bind_param('i',$habitacion); $open->execute();
   $curOpen = $open->get_result()->fetch_assoc();
   $open->close();
@@ -244,7 +247,7 @@ function extenderTurnoDesdePago($conn,$habitacion,$bloques,$turnoTag,$monto,$ref
   }
 
   $startArgTs = toArgTs($curOpen['hora_inicio'] ?? null);
-  $endArgTs = $startArgTs ? turnoEndArgTs($curOpen['turno'] ?? '', $startArgTs, $curOpen['bloques'] ?? 1) : null;
+  $endArgTs = $startArgTs ? endArgTsConAjuste($curOpen['turno'] ?? '', $startArgTs, $curOpen['bloques'] ?? 1, $curOpen['ajuste_segundos'] ?? 0) : null;
   $endUTC = $endArgTs ? gmdate('Y-m-d H:i:s', $endArgTs) : $nowUTC;
   $mins = ($startArgTs!==null && $endArgTs!==null)
     ? max(0, intval(round(($endArgTs - $startArgTs) / 60)))
@@ -626,7 +629,7 @@ if($tokenRet){
     </div>
     <div class="tabs">
       <button class="tab-btn active" data-tab="reserva">Reserva</button>
-      <button class="tab-btn" data-tab="envio">Enviar dinero</button>
+      <button class="tab-btn" data-tab="envio">Pagar Habitación en la que estoy</button>
       <button class="tab-btn" data-tab="extra">Turno extra</button>
       <button class="tab-btn" data-tab="servicio">Servicio al cuarto</button>
     </div>
@@ -716,7 +719,7 @@ if($tokenRet){
       <h2 style="margin-top:0;">2) Enviar dinero a caja</h2>
       <div class="grid">
         <div>
-          <label class="label">Habitación ocupada</label>
+          <label class="label">Ingresá el numero de tu habitación</label>
           <input type="number" id="env-hab" min="1" max="40" placeholder="Ej: 7">
         </div>
         <div>
