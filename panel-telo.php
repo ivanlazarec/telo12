@@ -960,12 +960,26 @@ if($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion'])){
 
     $estadoDest = $dest['estado'] ?? 'libre';
     $estadoReserva = 'reservada';
-    $startReservaTs = toArgTs($reserva['hora_inicio'] ?? null);
     $nowArgTs = nowArgDT()->getTimestamp();
-    $inicioReservaUTC = $reserva['hora_inicio'] ?? nowUTCStrFromArg();
-    $fechaRegistro = $startReservaTs ? argDateFromTs($startReservaTs) : argDateToday();
-    $horasExtra = 0;
+    $startReservaTs = toArgTs($reserva['hora_inicio'] ?? null);
+    if($startReservaTs === null){ $startReservaTs = $nowArgTs; }
 
+    $endReservaTs = turnoEndArgTs($turnoReserva, $startReservaTs, $bloquesReserva);
+    $durReserva = ($endReservaTs!==null && $startReservaTs!==null) ? max(0, $endReservaTs - $startReservaTs) : 0;
+    if($durReserva<=0){
+      if($turnoReserva==='turno-2h'){ $durReserva = 7200 * $bloquesReserva; }
+      elseif($turnoReserva==='turno-3h'){ $durReserva = 10800 * $bloquesReserva; }
+      elseif(in_array($turnoReserva, ['noche','noche-finde','noche-find'], true)){
+        $finNoche = nightEndTsFromStartArg($startReservaTs);
+        $durReserva = max(0, $finNoche - $startReservaTs);
+      }
+    }
+    if($durReserva<=0){ $durReserva = max(1, abs($nowArgTs - $startReservaTs)); }
+    
+    $remainingReserva = ($endReservaTs!==null) ? ($endReservaTs - $nowArgTs) : $durReserva;
+    $elapsedReserva = max(0, $nowArgTs - $startReservaTs);
+
+    $startDestTs = null; $remainingDestino = 0; $elapsedDest = null; $curOpen = null;
     if($estadoDest === 'ocupada' || $estadoDest === 'reservada'){
       $open = $conn->prepare("SELECT id, turno, hora_inicio, bloques FROM historial_habitaciones WHERE habitacion=? AND hora_fin IS NULL ORDER BY id DESC LIMIT 1");
       $open->bind_param('i',$hasta);
@@ -973,29 +987,25 @@ if($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion'])){
       $curOpen = $open->get_result()->fetch_assoc();
       $open->close();
 
-      $closeStartTs = toArgTs($curOpen['hora_inicio'] ?? null);
-      $closeEndTs = turnoEndArgTs($curOpen['turno'] ?? '', $closeStartTs, $curOpen['bloques'] ?? 1);
-      $closeEndTs = $closeEndTs ?? $nowArgTs;
-      $endUTC = gmdate('Y-m-d H:i:s', $closeEndTs);
-      $mins = ($closeStartTs!==null)
-        ? max(0, intval(round(($closeEndTs - $closeStartTs) / 60)))
-        : 0;
+      $startDestTs = toArgTs($curOpen['hora_inicio'] ?? null);
+      $endDestTs = $startDestTs ? turnoEndArgTs($curOpen['turno'] ?? '', $startDestTs, $curOpen['bloques'] ?? 1) : null;
+      $remainingDestino = $endDestTs!==null ? ($endDestTs - $nowArgTs) : 0;
+      if($startDestTs !== null){ $elapsedDest = max(0, $nowArgTs - $startDestTs); }
 
       if(!empty($curOpen['id'])){
+          $endUTC = nowUTCStrFromArg();
+        $mins = ($startDestTs!==null)
+          ? max(0, intval(round(($nowArgTs - $startDestTs) / 60)))
+          : 0;
+
         $close = $conn->prepare("UPDATE historial_habitaciones SET hora_fin=?, duracion_minutos=? WHERE id=?");
         $close->bind_param('sii',$endUTC,$mins,$curOpen['id']);
         $close->execute();
         $close->close();
       }
 
-      $startReservaTs = max($closeEndTs, $nowArgTs);
-      $inicioReservaUTC = gmdate('Y-m-d H:i:s', $startReservaTs);
-      $fechaRegistro = argDateFromTs($startReservaTs);
       $estadoReserva = 'ocupada';
     } elseif($estadoDest === 'limpieza'){
-      $startReservaTs = $nowArgTs;
-      $inicioReservaUTC = gmdate('Y-m-d H:i:s', $startReservaTs);
-      $fechaRegistro = argDateFromTs($startReservaTs);
       $estadoReserva = 'ocupada';
     } elseif($estadoDest === 'libre'){
       $estadoReserva = 'reservada';
@@ -1004,9 +1014,35 @@ if($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion'])){
       exit;
     }
 
-    if($turnoReserva==='turno-2h') $horasExtra = 2 * $bloquesReserva;
-    elseif($turnoReserva==='turno-3h') $horasExtra = 3 * $bloquesReserva;
+    $shouldSkipSum = ($estadoDest === 'ocupada' && $elapsedReserva <= 900 && $elapsedDest !== null && $elapsedDest <= 900);
+    if($estadoDest !== 'ocupada'){ $shouldSkipSum = false; }
 
+    $combinedRemaining = $remainingReserva;
+    if($estadoDest === 'ocupada' || $estadoDest === 'reservada'){
+      $combinedRemaining = $shouldSkipSum ? $remainingDestino : ($remainingReserva + $remainingDestino);
+    }
+
+    $startReservaTs = $nowArgTs + ($combinedRemaining - $durReserva);
+    $inicioReservaUTC = gmdate('Y-m-d H:i:s', $startReservaTs);
+    $fechaRegistro = argDateFromTs($startReservaTs);
+
+    if($shouldSkipSum && $precioReserva>0){
+      $ajHoraUTC = nowUTCStrFromArg();
+      $ajFecha = argDateFromTs($nowArgTs);
+      $ajPrecio = -1 * abs($precioReserva);
+      $ajEstado = 'ajuste';
+      $ajTurno = 'ajuste';
+      $ajDuracion = 0;
+      $ajTipo = $tipoDesde;
+      $ajExtra = 0; $ajBloq = 1;
+
+      $ajuste = $conn->prepare("INSERT INTO historial_habitaciones (habitacion, tipo, estado, turno, hora_inicio, hora_fin, duracion_minutos, fecha_registro, precio_aplicado, es_extra, bloques) VALUES (?,?,?,?,?,?,?,?,?,?,?)");
+      $ajuste->bind_param('isssssisiii',$hasta,$ajTipo,$ajEstado,$ajTurno,$ajHoraUTC,$ajHoraUTC,$ajDuracion,$ajFecha,$ajPrecio,$ajExtra,$ajBloq);
+      $ajuste->execute();
+      $ajuste->close();
+    }
+
+    $horasExtra = $combinedRemaining > 0 ? round($combinedRemaining / 3600, 2) : 0;
     $updHist = $conn->prepare("UPDATE historial_habitaciones SET habitacion=?, tipo=?, estado=?, turno=?, hora_inicio=?, fecha_registro=?, codigo=?, bloques=?, hora_fin=NULL, duracion_minutos=NULL, precio_aplicado=?, es_extra=? WHERE id=?");
     $updHist->bind_param('issssssiiii', $hasta, $tipoDesde, $estadoReserva, $turnoReserva, $inicioReservaUTC, $fechaRegistro, $codigo, $bloquesReserva, $precioReserva, $esExtraReserva, $reserva['id']);
     $updHist->execute();
