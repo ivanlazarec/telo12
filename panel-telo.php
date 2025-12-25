@@ -712,7 +712,7 @@ if ($_SERVER['REQUEST_METHOD']==='GET' && isset($_GET['ajax_turno']) && $_GET['a
   $inicioArg = fmtHoraArg($cur['inicio']);
   
   list($detalle, $total,) = movimientosCajaConReglas($conn, $cur['inicio'], null, 300, [
-    'minibar_en_caja' => false,
+    'minibar_en_caja' => true,
     'incluir_movs_digitales' => false,
     'sumar_digital_en_total' => false
   ]);
@@ -1154,7 +1154,7 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion']) && $_POST['ac
 
   // Resumen del turno que se cierra
   list($detalle,$total,, $cant) = movimientosCajaConReglas($conn,$cur['inicio'],$ahoraUTC,150,[
-    'minibar_en_caja' => false,
+    'minibar_en_caja' => true,
     'incluir_movs_digitales' => false,
     'sumar_digital_en_total' => false
   ]);
