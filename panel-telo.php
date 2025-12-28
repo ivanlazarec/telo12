@@ -123,6 +123,7 @@ $conn->query("CREATE TABLE IF NOT EXISTS historial_habitaciones (
   duracion_minutos INT NULL,   -- calculado al cerrar
   fecha_registro DATE,         -- día ARG del inicio
   precio_aplicado INT NULL,    -- ENTERO redondeado, snapshot del precio al crear
+  ajuste_segundos INT NOT NULL DEFAULT 0, -- ajuste manual de fin en segundos
   bloques INT NOT NULL DEFAULT 1, -- cantidad de turnos acumulados
   es_extra TINYINT(1) NOT NULL DEFAULT 0, -- 0=normal, 1=extra
   INDEX(habitacion), INDEX(fecha_registro), INDEX(turno)
@@ -132,6 +133,7 @@ $conn->query("CREATE TABLE IF NOT EXISTS historial_habitaciones (
 @$conn->query("ALTER TABLE historial_habitaciones ADD COLUMN IF NOT EXISTS precio_aplicado INT NULL");
 @$conn->query("ALTER TABLE historial_habitaciones ADD COLUMN IF NOT EXISTS es_extra TINYINT(1) NOT NULL DEFAULT 0");
 @$conn->query("ALTER TABLE historial_habitaciones ADD COLUMN IF NOT EXISTS bloques INT NOT NULL DEFAULT 1");
+@$conn->query("ALTER TABLE historial_habitaciones ADD COLUMN IF NOT EXISTS ajuste_segundos INT NOT NULL DEFAULT 0");
 @$conn->query("ALTER TABLE habitaciones ADD COLUMN IF NOT EXISTS codigo_reserva VARCHAR(10) NULL");
 @$conn->query("ALTER TABLE mensajes_internos ADD COLUMN IF NOT EXISTS snooze_until DATETIME NULL");
 
