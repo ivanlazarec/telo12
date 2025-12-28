@@ -1091,11 +1091,11 @@ if($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion'])){
         $open->close();
 
         if($curOpen){
+            $nowArgTs = nowArgDT()->getTimestamp();
+            $endUTC = gmdate('Y-m-d H:i:s', $nowArgTs);
             $startArgTs = toArgTs($curOpen['hora_inicio'] ?? null);
-            $endArgTs = $startArgTs ? turnoEndArgTs($curOpen['turno'] ?? '', $startArgTs, $curOpen['bloques'] ?? 1) : null;
-            $endUTC = $endArgTs ? gmdate('Y-m-d H:i:s', $endArgTs) : $startUTC;
-            $mins = ($startArgTs!==null && $endArgTs!==null)
-              ? max(0, intval(round(($endArgTs - $startArgTs) / 60)))
+            $mins = ($startArgTs!==null)
+              ? max(0, intval(round(($nowArgTs - $startArgTs) / 60)))
               : 0;
 
             $close = $conn->prepare("UPDATE historial_habitaciones SET hora_fin=?, duracion_minutos=? WHERE id=?");
@@ -1104,9 +1104,9 @@ if($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion'])){
             $close->close();
 
             $turnoHabitacion = $turnoTag;
-            $inicioHabitacion = $endUTC;
+            $inicioHabitacion = $startUTC;
             $precio = precioVigenteInt($conn, $tipoHab, $turnoTag);
-            $fecha = $endArgTs ? argDateFromTs($endArgTs) : $fecha;
+            $fecha = argDateFromTs($nowArgTs);
 
             $ins=$conn->prepare("INSERT INTO historial_habitaciones (habitacion,tipo,estado,turno,hora_inicio,fecha_registro,precio_aplicado,es_extra,bloques)
                              VALUES (?,?,?,?,?,?,?,1,1)");
