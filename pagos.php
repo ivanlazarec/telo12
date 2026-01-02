@@ -141,9 +141,9 @@ function registrarMensajeInterno($conn,$titulo,$texto){
   $st->bind_param('sss',$titulo,$texto,$ahora);
   $st->execute(); $st->close();
 }
-function registrarIngresoDigital($conn,$tipo,$habitacion,$categoria,$monto,$descripcion,$codigo,$bloques=1,$referencia=null){
+function registrarIngresoDigital($conn,$tipo,$habitacion,$categoria,$monto,$descripcion,$codigo,$bloques=1,$referencia=null,$createdAt=null){
   $turno = turnoActualClave($conn);
-  $now = nowUTCStrFromArg();
+  $now = $createdAt ?: nowUTCStrFromArg();
   $st = $conn->prepare("INSERT INTO digital_ingresos (tipo,habitacion,categoria,monto,descripcion,codigo,turno,bloques,referencia,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)");
   $st->bind_param('sisdsssiss',$tipo,$habitacion,$categoria,$monto,$descripcion,$codigo,$turno,$bloques,$referencia,$now);
   $st->execute(); $st->close();
@@ -231,7 +231,7 @@ function guardarPagoPendiente($conn,$tipo,$payload,$prefId,$token,$monto,$habita
   $st->bind_param('ssssdiss',$tipo,$json,$prefId,$token,$monto,$habitacion,$categoria,$ahora);
   $st->execute(); $st->close();
 }
-function extenderTurnoDesdePago($conn,$habitacion,$bloques,$turnoTag,$monto,$ref){
+function extenderTurnoDesdePago($conn,$habitacion,$bloques,$turnoTag,$monto,$ref,$createdAt=null){
   $blockHours = ($turnoTag==='turno-2h') ? 2 : 3;
   $nowUTC = nowUTCStrFromArg();
   $tipoHab = tipoDeHabitacion($habitacion, $GLOBALS['SUPER_VIP'], $GLOBALS['VIP_LIST']);
@@ -241,7 +241,7 @@ function extenderTurnoDesdePago($conn,$habitacion,$bloques,$turnoTag,$monto,$ref
   $open->close();
 
   if(!$curOpen){
-    registrarIngresoDigital($conn,'extra',$habitacion,$tipoHab,$monto,"Extra online sin turno abierto",$ref,$bloques,$ref);
+    registrarIngresoDigital($conn,'extra',$habitacion,$tipoHab,$monto,"Extra online sin turno abierto",$ref,$bloques,$ref,$createdAt);
     registrarMensajeInterno($conn,'Extra online','No había turno abierto en la hab. '.$habitacion.'. Revisar manualmente.');
     return null;
   }
@@ -260,20 +260,21 @@ function extenderTurnoDesdePago($conn,$habitacion,$bloques,$turnoTag,$monto,$ref
   $fecha = $endArgTs ? date('Y-m-d', $endArgTs) : argDateToday();
   $precio = precioVigenteInt($conn,$tipoHab,$turnoTag) * $bloques;
   $estado='ocupada';
+  $codigoExtra = substr($ref ?: 'DIGEXT', 0, 10);
   $ins=$conn->prepare("INSERT INTO historial_habitaciones (habitacion,tipo,estado,turno,hora_inicio,fecha_registro,precio_aplicado,es_extra,bloques,codigo)
-                       VALUES (?,?,?,?,?,?,?,1,?,(SELECT codigo_reserva FROM habitaciones WHERE id=?))");
-  $ins->bind_param('isssssiii',$habitacion,$tipoHab,$estado,$turnoTag,$endUTC,$fecha,$precio,$bloques,$habitacion);
+                       VALUES (?,?,?,?,?,?,?,1,?,?)");
+  $ins->bind_param('isssssiis',$habitacion,$tipoHab,$estado,$turnoTag,$endUTC,$fecha,$precio,$bloques,$codigoExtra);
   $ins->execute(); $ins->close();
 
   $st=$conn->prepare("UPDATE habitaciones SET estado='ocupada', tipo_turno=?, hora_inicio=? WHERE id=?");
   $st->bind_param('ssi',$turnoTag,$endUTC,$habitacion); $st->execute(); $st->close();
 
-  registrarIngresoDigital($conn,'extra',$habitacion,$tipoHab,$monto,"Turno extra online (+".($blockHours*$bloques)."h)",null,$bloques,$ref);
+  registrarIngresoDigital($conn,'extra',$habitacion,$tipoHab,$monto,"Turno extra online (+".($blockHours*$bloques)."h)",null,$bloques,$ref,$createdAt);
   registrarMensajeInterno($conn,'Turno extra online',"Hab. $habitacion — +".($blockHours*$bloques)."h agregadas desde pagos online.");
 
   return $endArgTs ? ($endArgTs + ($blockHours*3600*$bloques)) : null;
 }
-function procesarServicioDigital($conn,$habitacion,$items,$monto,$ref){
+function procesarServicioDigital($conn,$habitacion,$items,$monto,$ref,$createdAt=null){
   if(empty($items)){ return; }
   $ids = array_map('intval', array_column($items,'id'));
   $place = implode(',', $ids);
@@ -292,11 +293,11 @@ function procesarServicioDigital($conn,$habitacion,$items,$monto,$ref){
   }
   $descripcion = "Servicio al cuarto: ".implode(', ',$descParts);
   $tipoHab = tipoDeHabitacion($habitacion, $GLOBALS['SUPER_VIP'], $GLOBALS['VIP_LIST']);
-  registrarIngresoDigital($conn,'servicio',$habitacion,$tipoHab,$monto,$descripcion,null,1,$ref);
+  registrarIngresoDigital($conn,'servicio',$habitacion,$tipoHab,$monto,$descripcion,null,1,$ref,$createdAt);
   registrarMensajeInterno($conn,'Servicio al cuarto',"Hab. $habitacion — ".htmlspecialchars_decode($descripcion,ENT_QUOTES));
 }
 
-function finalizarReserva($conn,$payload,$row){
+function finalizarReserva($conn,$payload,$row,$createdAt=null){
   $categoria = $row['categoria'] ?: ($payload['categoria'] ?? 'comun');
   $turnoTag  = $payload['turno'] ?? 'turno-3h';
   $bloques   = max(1, (int)($payload['bloques'] ?? 1));
@@ -325,7 +326,7 @@ function finalizarReserva($conn,$payload,$row){
 
   $hrs = ($turnoTag==='turno-2h') ? 2*$bloques : (($turnoTag==='turno-3h') ? 3*$bloques : 0);
   $desc = "Reserva online ".($turnoTag==='noche' || $turnoTag==='noche-finde' ? 'Noche' : "+$hrs h");
-  registrarIngresoDigital($conn,'reserva',$habitacion,$tipoHab,$precio,$desc,$codigo,$bloques,$row['token']);
+  registrarIngresoDigital($conn,'reserva',$habitacion,$tipoHab,$precio,$desc,$codigo,$bloques,$row['token'],$createdAt);
   registrarMensajeInterno($conn,'Reserva online',"Hab. $habitacion ($tipoHab) reservada. Código $codigo. Turno: $turnoTag, bloques: $bloques.");
 
   $inicioTs = toArgTs($horaInicioUTC);
@@ -367,13 +368,13 @@ function procesarRetornoPago($status,$token,$ctx=[]){
     $conn->query("UPDATE pagos_online SET estado='aprobado', updated_at='".nowUTCStrFromArg()."' WHERE id=".(int)$row['id']);
 
     if($row['tipo']==='reserva'){
-      $res = finalizarReserva($conn,$payload,$row);
+      $res = finalizarReserva($conn,$payload,$row,$row['created_at'] ?? null);
       return array_merge(['tipo'=>'reserva'], $res);
     }
     if($row['tipo']==='envio'){
       $habitacion = (int)($payload['habitacion'] ?? 0);
       $tipoHab = $habitacion ? tipoDeHabitacion($habitacion,$GLOBALS['SUPER_VIP'],$GLOBALS['VIP_LIST']) : '—';
-      registrarIngresoDigital($conn,'envio',$habitacion,$tipoHab,(float)$row['monto'],"Envío de dinero online",$payload['codigo'] ?? null,1,$row['token']);
+      registrarIngresoDigital($conn,'envio',$habitacion,$tipoHab,(float)$row['monto'],"Envío de dinero online",$payload['codigo'] ?? null,1,$row['token'],$row['created_at'] ?? null);
       registrarMensajeInterno($conn,'Pago online',"Hab. $habitacion envió $".$row['monto']." a caja digital.");
       return ['ok'=>true,'tipo'=>'envio','habitacion'=>$habitacion,'monto'=>$row['monto']];
     }
@@ -381,12 +382,12 @@ function procesarRetornoPago($status,$token,$ctx=[]){
       $habitacion = (int)($payload['habitacion'] ?? 0);
       $bloques = max(1,(int)($payload['bloques'] ?? 1));
       $turnoTag = $payload['turno'] ?? 'turno-3h';
-      $finTs = extenderTurnoDesdePago($conn,$habitacion,$bloques,$turnoTag,(float)$row['monto'],$row['token']);
+      $finTs = extenderTurnoDesdePago($conn,$habitacion,$bloques,$turnoTag,(float)$row['monto'],$row['token'],$row['created_at'] ?? null);
       return ['ok'=>true,'tipo'=>'extra','habitacion'=>$habitacion,'fin_ts'=>$finTs,'bloques'=>$bloques,'turno'=>$turnoTag];
     }
     if($row['tipo']==='servicio'){
       $habitacion = (int)($payload['habitacion'] ?? 0);
-      procesarServicioDigital($conn,$habitacion,$payload['items'] ?? [],(float)$row['monto'],$row['token']);
+      procesarServicioDigital($conn,$habitacion,$payload['items'] ?? [],(float)$row['monto'],$row['token'],$row['created_at'] ?? null);
       return ['ok'=>true,'tipo'=>'servicio','habitacion'=>$habitacion,'monto'=>$row['monto']];
     }
   }

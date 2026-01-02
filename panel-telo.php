@@ -808,6 +808,7 @@ if($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion'])){
     $clave = $_POST['clave'] ?? '';
     $id    = intval($_POST['id'] ?? 0);
     $tipo  = $_POST['tipo'] ?? '';
+    $habitacionId = null;
 
     if ($clave !== $CLAVE_ADMIN) {
       echo json_encode(['ok'=>0, 'error'=>'Clave incorrecta']);
@@ -820,6 +821,13 @@ if($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion'])){
     }
 
     if ($tipo === 'hab') {
+        $selHab = $conn->prepare("SELECT habitacion FROM historial_habitaciones WHERE id=? LIMIT 1");
+      $selHab->bind_param('i', $id);
+      $selHab->execute();
+      $habRow = $selHab->get_result()->fetch_assoc();
+      $habitacionId = $habRow ? (int)$habRow['habitacion'] : null;
+      $selHab->close();
+
       $stmt = $conn->prepare("DELETE FROM historial_habitaciones WHERE id=?");
     } elseif ($tipo === 'venta') {
       $stmt = $conn->prepare("DELETE FROM ventas_turno WHERE id=?");
@@ -831,7 +839,36 @@ if($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion'])){
     $stmt->bind_param("i", $id);
     $stmt->execute();
     $stmt->close();
+// Si se eliminó un movimiento de habitación, liberar la habitación si no quedan ocupaciones abiertas
+    if ($tipo === 'hab' && $habitacionId) {
+      $delCobro = $conn->prepare("DELETE FROM cobros_movimientos WHERE id=? AND tipo='hab'");
+      $delCobro->bind_param('i', $id);
+      $delCobro->execute();
+      $delCobro->close();
 
+      $open = $conn->prepare("SELECT estado, turno, hora_inicio, codigo FROM historial_habitaciones WHERE habitacion=? AND hora_fin IS NULL ORDER BY id DESC LIMIT 1");
+      $open->bind_param('i', $habitacionId);
+      $open->execute();
+      $openRow = $open->get_result()->fetch_assoc();
+      $open->close();
+
+      if ($openRow) {
+        $estadoHab = in_array($openRow['estado'] ?? '', ['ocupada','reservada','limpieza'], true) ? $openRow['estado'] : 'ocupada';
+        $turnoHab  = $openRow['turno'] ?? null;
+        $inicioHab = $openRow['hora_inicio'] ?? null;
+        $codigoHab = $openRow['codigo'] ?? null;
+
+        $upHab = $conn->prepare("UPDATE habitaciones SET estado=?, tipo_turno=?, hora_inicio=?, codigo_reserva=? WHERE id=?");
+        $upHab->bind_param('ssssi', $estadoHab, $turnoHab, $inicioHab, $codigoHab, $habitacionId);
+        $upHab->execute();
+        $upHab->close();
+      } else {
+        $upHab = $conn->prepare("UPDATE habitaciones SET estado='limpieza', tipo_turno=NULL, hora_inicio=NULL, codigo_reserva=NULL WHERE id=?");
+        $upHab->bind_param('i', $habitacionId);
+        $upHab->execute();
+        $upHab->close();
+      }
+    }
     echo json_encode(['ok'=>1]);
     exit;
   }
