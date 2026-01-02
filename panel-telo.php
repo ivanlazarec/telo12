@@ -1118,7 +1118,7 @@ if($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion'])){
         $inicioHabitacion = $startUTC;
 
         // ¿Hay una ocupación abierta? entonces sumamos bloques en el mismo registro
-        $open = $conn->prepare("SELECT id, turno, hora_inicio, bloques FROM historial_habitaciones WHERE habitacion=? AND hora_fin IS NULL ORDER BY id DESC LIMIT 1");
+        $open = $conn->prepare("SELECT id, turno, hora_inicio, bloques, precio_aplicado, es_extra FROM historial_habitaciones WHERE habitacion=? AND hora_fin IS NULL ORDER BY id DESC LIMIT 1");
         $open->bind_param('i',$id);
         $open->execute();
         $curOpen = $open->get_result()->fetch_assoc();
@@ -1126,35 +1126,23 @@ if($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion'])){
 
         if($curOpen){
             
-            $startArgTs = toArgTs($curOpen['hora_inicio'] ?? null);
+            $turnoHabitacion = $curOpen['turno'] ?? $turnoTag;
+            $inicioHabitacion = $curOpen['hora_inicio'] ?? $startUTC;
+            $startArgTs = toArgTs($inicioHabitacion);
             $bloquesAbiertos = max(1, (int)($curOpen['bloques'] ?? 1));
-            $endArgTs = ($startArgTs!==null)
-              ? turnoEndArgTs($curOpen['turno'] ?? '', $startArgTs, $bloquesAbiertos)
-              : null;
 
-            $closeTs = max($nowArgTs, $endArgTs ?? $nowArgTs);
-            $endUTC = gmdate('Y-m-d H:i:s', $closeTs);
-            $mins = ($startArgTs!==null)
-              ? max(0, intval(round(($closeTs - $startArgTs) / 60)))
-              : 0;
+            $precio = precioVigenteInt($conn, $tipoHab, $turnoHabitacion);
+            $precioTotal = (int)($curOpen['precio_aplicado'] ?? 0) + $precio;
+            $bloquesTotales = $bloquesAbiertos + 1;
 
-            $close = $conn->prepare("UPDATE historial_habitaciones SET hora_fin=?, duracion_minutos=? WHERE id=?");
-            $close->bind_param('sii',$endUTC,$mins,$curOpen['id']);
-            $close->execute();
-            $close->close();
+            $upd = $conn->prepare("UPDATE historial_habitaciones SET bloques=?, precio_aplicado=?, es_extra=1 WHERE id=?");
+            $upd->bind_param('iii', $bloquesTotales, $precioTotal, $curOpen['id']);
+            $upd->execute();
+            $upd->close();
 
-            $turnoHabitacion = $turnoTag;
-            $inicioExtraTs = $closeTs;
-            $inicioHabitacion = gmdate('Y-m-d H:i:s', $inicioExtraTs);
-            $fecha = argDateFromTs($inicioExtraTs);
-            $precio = precioVigenteInt($conn, $tipoHab, $turnoTag);
-        
-
-            $ins=$conn->prepare("INSERT INTO historial_habitaciones (habitacion,tipo,estado,turno,hora_inicio,fecha_registro,precio_aplicado,es_extra,bloques)
-                             VALUES (?,?,?,?,?,?,?,1,1)");
-            $ins->bind_param('isssssi',$id,$tipoHab,$estado,$turnoTag,$inicioHabitacion,$fecha,$precio);
-            $ins->execute();
-            $ins->close();
+            if($startArgTs){
+              $fecha = argDateFromTs($startArgTs);
+            }
         } else {
             // precio vigente congelado
             $precio = precioVigenteInt($conn, $tipoHab, $turnoTag);
