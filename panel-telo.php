@@ -1106,16 +1106,11 @@ if($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion'])){
     $ids = array_filter(array_map('intval', explode(',', $_POST['ids'] ?? '')));
     $blockHours = turnoBlockHoursForToday();
     $turnoTag = $blockHours===2 ? 'turno-2h' : 'turno-3h';
-    $startUTC = nowUTCStrFromArg();
-    $fecha    = argDateToday();
+    $nowArgTs = nowArgDT()->getTimestamp();
+    $startUTC = gmdate('Y-m-d H:i:s', $nowArgTs);
+    $fecha    = argDateFromTs($nowArgTs);
 
     foreach($ids as $id){
-        // si tiene noche abierta, no sumar
-        $chk = $conn->prepare("SELECT COUNT(*) c FROM historial_habitaciones WHERE habitacion=? AND turno IN ('noche','noche-finde') AND hora_fin IS NULL");
-        $chk->bind_param('i',$id); $chk->execute();
-        $res=$chk->get_result()->fetch_assoc();
-        $chk->close();
-        if(($res['c']??0)>0){ continue; }
 
         $tipoHab = tipoDeHabitacion($id,$SUPER_VIP,$VIP_LIST);
         $estado='ocupada';
@@ -1130,11 +1125,17 @@ if($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion'])){
         $open->close();
 
         if($curOpen){
-            $nowArgTs = nowArgDT()->getTimestamp();
-            $endUTC = gmdate('Y-m-d H:i:s', $nowArgTs);
+            
             $startArgTs = toArgTs($curOpen['hora_inicio'] ?? null);
+            $bloquesAbiertos = max(1, (int)($curOpen['bloques'] ?? 1));
+            $endArgTs = ($startArgTs!==null)
+              ? turnoEndArgTs($curOpen['turno'] ?? '', $startArgTs, $bloquesAbiertos)
+              : null;
+
+            $closeTs = max($nowArgTs, $endArgTs ?? $nowArgTs);
+            $endUTC = gmdate('Y-m-d H:i:s', $closeTs);
             $mins = ($startArgTs!==null)
-              ? max(0, intval(round(($nowArgTs - $startArgTs) / 60)))
+              ? max(0, intval(round(($closeTs - $startArgTs) / 60)))
               : 0;
 
             $close = $conn->prepare("UPDATE historial_habitaciones SET hora_fin=?, duracion_minutos=? WHERE id=?");
@@ -1143,9 +1144,11 @@ if($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion'])){
             $close->close();
 
             $turnoHabitacion = $turnoTag;
-            $inicioHabitacion = $startUTC;
+            $inicioExtraTs = $closeTs;
+            $inicioHabitacion = gmdate('Y-m-d H:i:s', $inicioExtraTs);
+            $fecha = argDateFromTs($inicioExtraTs);
             $precio = precioVigenteInt($conn, $tipoHab, $turnoTag);
-            $fecha = argDateFromTs($nowArgTs);
+        
 
             $ins=$conn->prepare("INSERT INTO historial_habitaciones (habitacion,tipo,estado,turno,hora_inicio,fecha_registro,precio_aplicado,es_extra,bloques)
                              VALUES (?,?,?,?,?,?,?,1,1)");
