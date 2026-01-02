@@ -164,7 +164,9 @@ function crearPreferenciaMP($title,$amount,$token,$description){
       'failure' => baseUrl() . '?status=failure&token='.$token,
       'pending' => baseUrl() . '?status=pending&token='.$token,
     ],
-    'auto_return' => 'approved'
+    'auto_return' => 'approved',
+    'external_reference' => $token,
+    'notification_url' => baseUrl() . '?webhook=mp'
   ];
   $ch = curl_init($endpoint);
   curl_setopt($ch, CURLOPT_POST, true);
@@ -224,12 +226,72 @@ function verificarPagoMP($paymentId,$prefEsperado=null){
     'matches_pref' => $coincide
   ];
 }
+function buscarPagoAprobadoPorToken($token,$prefEsperado=null){
+  global $MP_ACCESS_TOKEN;
+  $token = preg_replace('/[^a-zA-Z0-9_-]/','', $token ?? '');
+  if(!$token) return null;
+
+  $url = "https://api.mercadopago.com/v1/payments/search?external_reference=".urlencode($token)."&sort=date_created&criteria=desc&limit=5";
+  $ch = curl_init($url);
+  curl_setopt_array($ch, [
+    CURLOPT_RETURNTRANSFER => true,
+    CURLOPT_HTTPHEADER => [
+      'Authorization: Bearer '.$MP_ACCESS_TOKEN
+    ]
+  ]);
+  $resp = curl_exec($ch);
+  $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+  curl_close($ch);
+  if($resp === false || $code >= 400){ return null; }
+  $j = json_decode($resp, true);
+  $results = $j['results'] ?? [];
+  foreach($results as $r){
+    $status = strtolower($r['status'] ?? '');
+    $prefId = $r['preference_id'] ?? ($r['order']['id'] ?? null);
+    $matches = $prefEsperado ? ($prefId === $prefEsperado) : true;
+    if($status === 'approved' && $matches){
+      return $r['id'] ?? null;
+    }
+  }
+  return null;
+}
+function buscarPagoAprobadoPorMovimiento($prefId){
+  global $MP_ACCESS_TOKEN;
+  $prefId = preg_replace('/[^a-zA-Z0-9_-]/','', $prefId ?? '');
+  if(!$prefId) return null;
+
+  $url = "https://api.mercadopago.com/merchant_orders/search?preference_id=".urlencode($prefId);
+  $ch = curl_init($url);
+  curl_setopt_array($ch, [
+    CURLOPT_RETURNTRANSFER => true,
+    CURLOPT_HTTPHEADER => [
+      'Authorization: Bearer '.$MP_ACCESS_TOKEN
+    ]
+  ]);
+  $resp = curl_exec($ch);
+  $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+  curl_close($ch);
+  if($resp === false || $code >= 400){ return null; }
+  $j = json_decode($resp, true);
+  $results = $j['elements'] ?? [];
+  foreach($results as $mo){
+    $payments = $mo['payments'] ?? [];
+    foreach($payments as $p){
+      if(strtolower($p['status'] ?? '') === 'approved'){
+        return $p['id'] ?? null;
+      }
+    }
+  }
+  return null;
+}
+
 function guardarPagoPendiente($conn,$tipo,$payload,$prefId,$token,$monto,$habitacion,$categoria){
   $ahora = nowUTCStrFromArg();
   $st = $conn->prepare("INSERT INTO pagos_online (tipo,payload,pref_id,token,estado,monto,habitacion,categoria,created_at) VALUES (?,?,?,?, 'pendiente', ?,?,?,?)");
   $json = json_encode($payload, JSON_UNESCAPED_UNICODE);
   $st->bind_param('ssssdiss',$tipo,$json,$prefId,$token,$monto,$habitacion,$categoria,$ahora);
   $st->execute(); $st->close();
+  dispararChequeoAsyncPendientes();
 }
 function extenderTurnoDesdePago($conn,$habitacion,$bloques,$turnoTag,$monto,$ref,$createdAt=null){
   $blockHours = ($turnoTag==='turno-2h') ? 2 : 3;
@@ -391,6 +453,13 @@ function procesarRetornoPago($status,$token,$ctx=[]){
       return ['ok'=>true,'tipo'=>'servicio','habitacion'=>$habitacion,'monto'=>$row['monto']];
     }
   }
+if($row['estado'] !== 'aprobado' && $statusNorm!=='success'){
+    $approvedId = buscarPagoAprobadoPorToken($row['token'] ?? null, $row['pref_id'] ?? null)
+      ?: buscarPagoAprobadoPorMovimiento($row['pref_id'] ?? null);
+    if($approvedId){
+      return procesarRetornoPago('success', $row['token'], ['payment_id'=>$approvedId,'preference_id'=>$row['pref_id'] ?? null]);
+    }
+  }
 
   return [
     'ok'=>($row['estado']==='aprobado'),
@@ -399,6 +468,147 @@ function procesarRetornoPago($status,$token,$ctx=[]){
     'monto'=>$row['monto'] ?? 0,
     'error'=> $statusNorm!=='success' ? 'El pago no fue aprobado' : null
   ];
+}
+function procesarWebhookMP(){
+  if(($_GET['webhook'] ?? '')!=='mp'){ return; }
+  header('Content-Type: application/json; charset=utf-8');
+
+  $raw = file_get_contents('php://input');
+  $body = json_decode($raw, true);
+  $paymentId = null;
+
+  // Mercado Pago puede enviar GET (topic=payment&id=...) o POST con data.id
+  if(isset($_GET['id'])){ $paymentId = $_GET['id']; }
+  if(!$paymentId && isset($_GET['data_id'])){ $paymentId = $_GET['data_id']; } // fallback
+  if(!$paymentId && isset($_GET['payment_id'])){ $paymentId = $_GET['payment_id']; }
+  if(!$paymentId && isset($_GET['data']['id'])){ $paymentId = $_GET['data']['id']; }
+  if(!$paymentId && isset($body['data']['id'])){ $paymentId = $body['data']['id']; }
+  if(!$paymentId && isset($body['id'])){ $paymentId = $body['id']; }
+
+  $paymentId = preg_replace('/[^a-zA-Z0-9_-]/','', $paymentId ?? '');
+  if(!$paymentId){ echo json_encode(['ok'=>0,'error'=>'missing payment id']); exit; }
+
+  $prefEsperado = $_GET['preference_id'] ?? null;
+
+  $verif = verificarPagoMP($paymentId, $prefEsperado);
+  if(!($verif['approved'] ?? false)){
+    echo json_encode(['ok'=>1,'status'=>$verif['status'] ?? 'unknown']); exit;
+  }
+
+  $pref = $verif['preference_id'] ?? $prefEsperado;
+  if(!$pref){ echo json_encode(['ok'=>0,'error'=>'missing preference']); exit; }
+
+  $conn = db();
+  $st = $conn->prepare("SELECT token FROM pagos_online WHERE pref_id=? AND estado!='aprobado' LIMIT 1");
+  $st->bind_param('s',$pref); $st->execute();
+  $row = $st->get_result()->fetch_assoc();
+  $st->close();
+
+  if($row && !empty($row['token'])){
+    procesarRetornoPago('success', $row['token'], ['payment_id'=>$paymentId,'preference_id'=>$pref]);
+  }else{
+    $fallbackToken = null;
+    if(!$fallbackToken){
+      $tokenQ = $conn->prepare("SELECT token FROM pagos_online WHERE pref_id=? LIMIT 1");
+      $tokenQ->bind_param('s',$pref); $tokenQ->execute();
+      $fallbackToken = $tokenQ->get_result()->fetch_assoc()['token'] ?? null;
+      $tokenQ->close();
+    }
+    if($fallbackToken){
+      $altPid = $paymentId ?: buscarPagoAprobadoPorMovimiento($pref);
+      if($altPid){
+        procesarRetornoPago('success', $fallbackToken, ['payment_id'=>$altPid,'preference_id'=>$pref]);
+      }
+    }
+  }
+
+  // barrido rápido para otros pendientes (todas las formas de pago)
+  revisarPagosPendientes($conn,50,48);
+
+  echo json_encode(['ok'=>1,'status'=>'processed']);
+  exit;
+}
+
+function revisarPagosPendientes($conn,$limit=30,$maxHours=24){
+  $updated=0; $checked=0;
+  $minCreated = date('Y-m-d H:i:s', time() - ($maxHours*3600));
+  $st = $conn->prepare("SELECT id, token, pref_id FROM pagos_online WHERE estado='pendiente' AND created_at>=? ORDER BY id DESC LIMIT ?");
+  $st->bind_param('si',$minCreated,$limit); $st->execute();
+  $res = $st->get_result(); $rows = [];
+  while($r=$res->fetch_assoc()){ $rows[]=$r; }
+  $st->close();
+
+  foreach($rows as $row){
+    $checked++;
+    $pid = buscarPagoAprobadoPorToken($row['token'] ?? '', $row['pref_id'] ?? null)
+      ?: buscarPagoAprobadoPorMovimiento($row['pref_id'] ?? null);
+    if($pid){
+      procesarRetornoPago('success', $row['token'], ['payment_id'=>$pid,'preference_id'=>$row['pref_id'] ?? null]);
+      $updated++;
+    }
+  }
+  return ['checked'=>$checked,'updated'=>$updated];
+}
+
+function verificarPendientesPeriodico(){
+  if(($_GET['cron'] ?? '')!=='pendientes'){ return; }
+
+  $interval = max(5, min(60, intval($_GET['interval'] ?? 10)));
+  $loops = max(1, min(360, intval($_GET['loops'] ?? 1)));
+
+  ignore_user_abort(true);
+  set_time_limit(0);
+  header('Content-Type: application/json; charset=utf-8');
+
+  $conn = db();
+  $runs=[];
+  for($i=0; $i<$loops; $i++){
+    $runs[] = revisarPagosPendientes($conn);
+    if($i < $loops-1){ sleep($interval); }
+  }
+
+  echo json_encode(['ok'=>1,'runs'=>$runs]);
+  exit;
+}
+
+function autoScanPendientesCada10s(){
+  $flag = sys_get_temp_dir().'/mp_autoscan.ts';
+  $now = time();
+  $last = intval(@file_get_contents($flag));
+  if(($now - $last) < 10){ return; }
+  @file_put_contents($flag, (string)$now);
+  revisarPagosPendientes(db(),50,48);
+}
+
+function dispararChequeoAsyncPendientes(){
+  $url = baseUrl() . '?cron=pendientes&interval=10&loops=24&auto=1';
+
+  // intenta hacer la llamada en background para no bloquear al usuario
+  if(function_exists('popen')){
+    $cmd = "curl -m 5 -s '".escapeshellarg($url)."' > /dev/null 2>&1 &";
+    @popen($cmd, 'r');
+    return;
+  }
+
+  // fallback silencioso sin popen
+  $opts = ['http'=>['method'=>'GET','timeout'=>1]];
+  @file_get_contents($url,false,stream_context_create($opts));
+}
+
+function daemonPendientesCLI(){
+  if(php_sapi_name() !== 'cli'){ return; }
+  global $argv;
+  if(!in_array('--cron-daemon', $argv)){ return; }
+  $interval = 60;
+  $maxHours = 48;
+  $limit = 100;
+
+  $conn = db();
+  while(true){
+    revisarPagosPendientes($conn,$limit,$maxHours);
+    sleep($interval);
+  }
+  exit;
 }
 
 function preciosMap($conn){
@@ -409,6 +619,10 @@ function preciosMap($conn){
   }
   return $out;
 }
+procesarWebhookMP();
+verificarPendientesPeriodico();
+autoScanPendientesCada10s();
+daemonPendientesCLI();
 
 /* ========= AJAX simples ========= */
 if(isset($_GET['ajax']) && $_GET['ajax']==='disponibilidad'){
