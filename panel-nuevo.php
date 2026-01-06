@@ -77,12 +77,7 @@ if($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion']) && $_POST['acc
 /* ================= AJAX alertas de minibar ================= */
 /* ================= Mensajes internos (fetch) ================= */
 if ($_SERVER['REQUEST_METHOD']==='GET' && isset($_GET['ajax_mensajes'])) {
-  $res = $conn->query("
-    SELECT id, nombre, mensaje, created_at
-    FROM mensajes_internos
-    WHERE estado='pendiente'
-      AND (snooze_until IS NULL OR snooze_until <= UTC_TIMESTAMP())
-    ORDER BY created_at ASC");
+  $res = $conn->query("SELECT id, nombre, mensaje, created_at FROM mensajes_internos WHERE estado='pendiente' ORDER BY created_at ASC");
   $items = [];
   while($r = $res->fetch_assoc()){
     $items[] = [
@@ -103,8 +98,7 @@ $conn->query("CREATE TABLE IF NOT EXISTS habitaciones (
   id INT PRIMARY KEY,
   estado VARCHAR(20) DEFAULT 'libre',   -- libre | ocupada | limpieza | reservada
   tipo_turno VARCHAR(20) NULL,
-  hora_inicio DATETIME NULL,
-  codigo_reserva VARCHAR(10) NULL
+  hora_inicio DATETIME NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
 
 for($i=1;$i<=40;$i++){
@@ -123,7 +117,6 @@ $conn->query("CREATE TABLE IF NOT EXISTS historial_habitaciones (
   duracion_minutos INT NULL,   -- calculado al cerrar
   fecha_registro DATE,         -- día ARG del inicio
   precio_aplicado INT NULL,    -- ENTERO redondeado, snapshot del precio al crear
-  ajuste_segundos INT NOT NULL DEFAULT 0, -- ajuste manual de fin en segundos
   bloques INT NOT NULL DEFAULT 1, -- cantidad de turnos acumulados
   es_extra TINYINT(1) NOT NULL DEFAULT 0, -- 0=normal, 1=extra
   INDEX(habitacion), INDEX(fecha_registro), INDEX(turno)
@@ -133,44 +126,6 @@ $conn->query("CREATE TABLE IF NOT EXISTS historial_habitaciones (
 @$conn->query("ALTER TABLE historial_habitaciones ADD COLUMN IF NOT EXISTS precio_aplicado INT NULL");
 @$conn->query("ALTER TABLE historial_habitaciones ADD COLUMN IF NOT EXISTS es_extra TINYINT(1) NOT NULL DEFAULT 0");
 @$conn->query("ALTER TABLE historial_habitaciones ADD COLUMN IF NOT EXISTS bloques INT NOT NULL DEFAULT 1");
-@$conn->query("ALTER TABLE historial_habitaciones ADD COLUMN IF NOT EXISTS ajuste_segundos INT NOT NULL DEFAULT 0");
-@$conn->query("ALTER TABLE habitaciones ADD COLUMN IF NOT EXISTS codigo_reserva VARCHAR(10) NULL");
-@$conn->query("ALTER TABLE mensajes_internos ADD COLUMN IF NOT EXISTS snooze_until DATETIME NULL");
-
-/* ====== ingresos digitales / pagos online ====== */
-$conn->query("
-CREATE TABLE IF NOT EXISTS digital_ingresos (
-  id INT AUTO_INCREMENT PRIMARY KEY,
-  tipo VARCHAR(20) NOT NULL,
-  habitacion INT NULL,
-  categoria VARCHAR(20) NULL,
-  monto DECIMAL(10,2) NOT NULL,
-  descripcion VARCHAR(255) NULL,
-  codigo VARCHAR(10) NULL,
-  turno VARCHAR(20) NULL,
-  bloques INT NOT NULL DEFAULT 1,
-  referencia VARCHAR(80) NULL,
-  created_at DATETIME NOT NULL,
-  INDEX(habitacion), INDEX(tipo), INDEX(created_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-");
-
-$conn->query("
-CREATE TABLE IF NOT EXISTS pagos_online (
-  id INT AUTO_INCREMENT PRIMARY KEY,
-  tipo VARCHAR(20) NOT NULL,
-  payload TEXT NULL,
-  pref_id VARCHAR(80) NOT NULL,
-  token VARCHAR(80) NOT NULL,
-  estado VARCHAR(20) NOT NULL DEFAULT 'pendiente',
-  monto DECIMAL(10,2) NOT NULL DEFAULT 0,
-  habitacion INT NULL,
-  categoria VARCHAR(20) NULL,
-  created_at DATETIME NOT NULL,
-  updated_at DATETIME NULL,
-  UNIQUE KEY token_unique (token)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-");
 /* ====== precios_habitaciones (incluye noche-finde) ====== */
 $conn->query("
 CREATE TABLE IF NOT EXISTS precios_habitaciones (
@@ -232,7 +187,6 @@ CREATE TABLE IF NOT EXISTS mensajes_internos (
   estado ENUM('pendiente','leido') NOT NULL DEFAULT 'pendiente',
   created_at DATETIME NOT NULL,
   updated_at DATETIME NULL,
-  snooze_until DATETIME NULL,
   INDEX (estado),
   INDEX (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -267,20 +221,6 @@ function toArgTs($utc){
   $dtUtc->setTimezone(new DateTimeZone('America/Argentina/Buenos_Aires'));
   return $dtUtc->getTimestamp();
 }
-function argDateFromTs($ts){
-  $dt = new DateTime('@'.$ts);
-  $dt->setTimezone(new DateTimeZone('America/Argentina/Buenos_Aires'));
-  return $dt->format('Y-m-d');
-}
-function turnoEndArgTs($turno,$startArgTs,$bloques=1){
-  $bloques = max(1, (int)$bloques);
-  if($turno==='turno-2h'){ return $startArgTs + (2 * 3600 * $bloques); }
-  if($turno==='turno-3h'){ return $startArgTs + (3 * 3600 * $bloques); }
-  if(in_array($turno, ['noche','noche-finde','noche-find'], true)){
-    return nightEndTsFromStartArg($startArgTs);
-  }
-  return $startArgTs;
-}
 function argNowInfo(){ $dt=nowArgDT(); return [(int)$dt->format('w'), (int)$dt->format('G')]; } // 0=Dom..6=Sab
 function isTwoHourWindowNow(int $dow, int $hour){
   return ($dow===5 && $hour>=8) || $dow===6 || $dow===0; // Vie 8am → Dom 23:59
@@ -303,22 +243,7 @@ function fmtFechaArg($utc){
   return $dt ? $dt->format('d/m/Y') : '';
 }
 
-function turnoLabelCorto($turno){
-  if($turno==='turno-2h') return 'Turno 2h';
-  if($turno==='turno-3h') return 'Turno 3h';
-  if($turno==='noche') return 'Noche';
-  if($turno==='noche-finde' || $turno==='noche-find') return 'Noche finde';
-  return ucfirst($turno);
-}
-function proximaExtra($conn,$habitacion,$horaInicio){
-  $st = $conn->prepare("SELECT turno, hora_inicio FROM historial_habitaciones WHERE habitacion=? AND hora_inicio > ? AND es_extra=1 ORDER BY hora_inicio ASC LIMIT 1");
-  $st->bind_param('is',$habitacion,$horaInicio);
-  $st->execute();
-  $row = $st->get_result()->fetch_assoc();
-  $st->close();
-  if(!$row){ return [null,null]; }
-  return [toArgTs($row['hora_inicio']), $row['turno'] ?? null];
-}
+
 // Turno Noche: 21:00 → 10:00 todos los días
 function nightEndTsFromStartArg($startTs){
   $dt = new DateTime('@'.$startTs); $dt->setTimezone(new DateTimeZone('America/Argentina/Buenos_Aires'));
@@ -414,7 +339,7 @@ function renderFilaAjax($ids, $conn, $SUPER_VIP, $VIP_LIST){
   echo '<div class="rooms-row">';
   foreach($ids as $id){
     // Estado en caliente desde la tabla habitaciones
-    $st = $conn->prepare("SELECT estado, codigo_reserva FROM habitaciones WHERE id=? LIMIT 1");
+    $st = $conn->prepare("SELECT estado FROM habitaciones WHERE id=? LIMIT 1");
     $st->bind_param('i', $id);
     $st->execute();
     $res = $st->get_result();
@@ -422,7 +347,6 @@ function renderFilaAjax($ids, $conn, $SUPER_VIP, $VIP_LIST){
     $st->close();
 
     $estado = $row['estado'] ?? 'libre';
-    $codigo = trim($row['codigo_reserva'] ?? '');
     $tipo   = tipoDeHabitacion($id, $SUPER_VIP, $VIP_LIST);
     $rest   = sumRemainingForRoom($conn, $id);
     $isSuper = in_array($id, $SUPER_VIP);
@@ -441,14 +365,10 @@ function renderFilaAjax($ids, $conn, $SUPER_VIP, $VIP_LIST){
         . ' id="hab-' . $id . '"'
         . ' data-id="' . $id . '"'
         . ' data-restante="' . $rest . '"'
-        . ' data-tipo="' . htmlspecialchars($tipo) . '"'
-        . ' data-codigo="' . htmlspecialchars($codigo) . '">';
+        . ' data-tipo="' . htmlspecialchars($tipo) . '">';
     echo '    <div class="state-line">' . htmlspecialchars($estadoTxt) . '</div>';
     echo '    <div class="timer" id="timer-' . $id . '">' . htmlspecialchars($timer) . '</div>';
     echo '    <div class="room-num">' . $id . '</div>';
-    if($codigo && ($estado === 'reservada' || $estado === 'ocupada')){
-      echo '    <div class="room-code">#' . htmlspecialchars($codigo) . '</div>';
-    }
     echo '  </div>';
     echo '  <div class="room-kind">' . htmlspecialchars($tipo) . '</div>';
     echo '</div>';
@@ -503,7 +423,6 @@ function cajaDetalleDesdeHasta($conn,$inicioUTC,$finUTC=null,$limit=150){
         CONVERT(h.turno USING utf8mb4) COLLATE $col AS turno,
         h.hora_inicio,
         h.precio_aplicado AS monto,
-        h.es_extra,
         'hab' COLLATE $col AS tipo,
         NULL AS nombre,
         COALESCE(cm.cobrado, 0) AS cobrado
@@ -517,7 +436,6 @@ function cajaDetalleDesdeHasta($conn,$inicioUTC,$finUTC=null,$limit=150){
         CONVERT(v.turno USING utf8mb4) COLLATE $col AS turno,
         v.hora AS hora_inicio,
         v.precio AS monto,
-        0 AS es_extra,
         'venta' COLLATE $col AS tipo,
          CONVERT(v.nombre USING utf8mb4) COLLATE $col AS nombre,
         COALESCE(cm.cobrado, 0) AS cobrado
@@ -540,185 +458,33 @@ function cajaDetalleDesdeHasta($conn,$inicioUTC,$finUTC=null,$limit=150){
   while($r=$res->fetch_assoc()){
        $label = '';
     if($r['tipo']==='hab')      $label = (int)$r['habitacion'];
-       elseif($r['tipo']==='venta') $label = '🧃 '.$r['nombre'];
-       else                         $label = '💳 Hab. '.($r['habitacion'] ?? '-');
+    elseif($r['tipo']==='venta') $label = '🧃 '.$r['nombre'];
+    else                         $label = '💳 Hab. '.($r['habitacion'] ?? '-');
     
     $rows[] = [
       'id'    => (int)$r['id'],               // ID real del movimiento
       'tipo'  => $r['tipo'],                  // 'hab', 'venta' o 'ajuste'
-      'habitacion' => $r['habitacion'] ? (int)$r['habitacion'] : null,
       'hab'   => $label,
       'turno' => $r['turno'],
       'inicio'=> fmtHoraArg($r['hora_inicio']),
-      'hora_inicio_raw' => $r['hora_inicio'],
       'monto' => (int)($r['monto']??0),
       'cobrado' => (int)($r['cobrado'] ?? 0),
-      'es_extra' => (int)($r['es_extra'] ?? 0),
-    ];
-  }
-  $st->close();
-  return $rows;
-}
-function digitalIngresosDesdeHasta($conn,$inicioUTC,$finUTC=null,$limit=300){
-  $sql = "SELECT id, tipo, habitacion, categoria, monto, descripcion, codigo, created_at
-          FROM digital_ingresos
-          WHERE created_at >= ?".($finUTC ? " AND created_at < ?" : "")."
-          ORDER BY created_at ASC
-          LIMIT ?";
-  $st = $conn->prepare($sql);
-  if($finUTC){
-    $st->bind_param('ssi',$inicioUTC,$finUTC,$limit);
-  } else {
-    $st->bind_param('si',$inicioUTC,$limit);
-  }
-  $st->execute();
-  $res = $st->get_result();
-  $rows = [];
-  while($r = $res->fetch_assoc()){
-    $rows[] = [
-      'id' => (int)$r['id'],
-      'tipo' => $r['tipo'] ?? '',
-      'habitacion' => $r['habitacion'] ? (int)$r['habitacion'] : null,
-      'categoria' => $r['categoria'] ?? '',
-      'monto' => (float)($r['monto'] ?? 0),
-      'descripcion' => $r['descripcion'] ?? '',
-      'codigo' => $r['codigo'] ?? '',
-      'created_at' => $r['created_at'] ?? ''
     ];
   }
   $st->close();
   return $rows;
 }
 
-function digitalTotalDesdeHasta($conn,$inicioUTC,$finUTC=null){
-  $sql = "SELECT SUM(monto) total FROM digital_ingresos WHERE created_at >= ?".($finUTC ? " AND created_at < ?" : "");
-  $st = $conn->prepare($sql);
-  if($finUTC){
-    $st->bind_param('ss',$inicioUTC,$finUTC);
-  } else {
-    $st->bind_param('s',$inicioUTC);
-  }
-  $st->execute();
-  $res = $st->get_result()->fetch_assoc();
-  $st->close();
-  return (float)($res['total'] ?? 0);
-}
-function calcularAjustesDigitales($detalle,$movsDigital){
-  $ajustes = [];
-  $ajusteTotal = 0.0;
-
-  foreach($movsDigital as $d){
-    if(($d['tipo'] ?? '') !== 'envio') continue;
-    $hab = $d['habitacion'] ?? null;
-    if(!$hab) continue;
-    $dTs = toArgTs($d['created_at'] ?? '');
-    if($dTs === null) continue;
-
-    $mejor = null;
-    foreach($detalle as $idx=>$m){
-      if(($m['tipo'] ?? '') !== 'hab') continue;
-      if((int)($m['habitacion'] ?? 0) !== (int)$hab) continue;
-      $startTs = toArgTs($m['hora_inicio_raw'] ?? '');
-      if($startTs === null) continue;
-      $ventana = ((int)($m['es_extra'] ?? 0) === 1) ? 300 : 900; // 5 min extras, 15 min ocupación normal
-      $diff = abs($dTs - $startTs);
-      if($diff > $ventana) continue;
-
-      if($mejor === null || $diff < $mejor['diff'] || ($ventana === 300 && $mejor['ventana'] !== 300)){
-        $mejor = ['idx'=>$idx,'diff'=>$diff,'ventana'=>$ventana];
-      }
-    }
-
-if($mejor){
-      $montoNeg = -1 * (float)$d['monto'];
-      $ajusteTotal += $montoNeg;
-      $ajustes[] = [
-        'id' => $d['id'],
-        'tipo' => 'ajuste_digital',
-        'habitacion' => (int)$hab,
-        'hab' => '💳 Ajuste Hab. '.$hab,
-        'turno' => $detalle[$mejor['idx']]['turno'] ?? '',
-        'inicio' => fmtHoraArg($d['created_at']),
-        'hora_inicio_raw' => $d['created_at'],
-        'monto' => (int)round($montoNeg),
-        'cobrado' => 1,
-        'es_extra' => 0
-      ];
-    }
-  }
-
-  return [$ajustes, $ajusteTotal];
-}
-
-function movimientosCajaConReglas($conn,$inicioUTC,$finUTC=null,$limit=300,$opts=[]){
-  $opts = array_merge([
-    'minibar_en_caja' => true,
-    'incluir_movs_digitales' => false,
-    'sumar_digital_en_total' => true
-  ], $opts);
-
-  $detalle = cajaDetalleDesdeHasta($conn,$inicioUTC,$finUTC,$limit);
-  $cantHab = 0;
-  foreach($detalle as &$m){
-    if(($m['tipo'] ?? '') === 'hab'){ $cantHab++; }
-    if(!$opts['minibar_en_caja'] && ($m['tipo'] ?? '') === 'venta'){
-      $m['monto'] = 0;
-    }
-  }
-  unset($m);
-
-  $movsDigital = digitalIngresosDesdeHasta($conn, $inicioUTC, $finUTC, $limit);
-  list($ajustesDigitales,) = calcularAjustesDigitales($detalle,$movsDigital);
-  $detalle = array_merge($detalle, $ajustesDigitales);
-
-  $digitalRows = [];
-  $digitalTotal = 0.0;
-  foreach($movsDigital as $d){
-    $digitalTotal += (float)$d['monto'];
-    if($opts['incluir_movs_digitales']){
-      $digitalRows[] = [
-        'id' => $d['id'],
-        'tipo' => 'digital',
-        'habitacion' => $d['habitacion'] ? (int)$d['habitacion'] : null,
-        'hab' => $d['habitacion'] ? ('Hab. '.$d['habitacion']) : ($d['tipo'] ?: 'Ingreso digital'),
-        'turno' => $d['tipo'] ?? '',
-        'inicio' => fmtHoraArg($d['created_at']),
-        'hora_inicio_raw' => $d['created_at'],
-        'monto' => (int)round($d['monto']),
-        'descripcion' => $d['descripcion'] ?? '',
-        'codigo' => $d['codigo'] ?? '',
-        'cobrado' => 1,
-        'es_extra' => 0
-      ];
-    }
-  }
-  $detalle = array_merge($detalle, $digitalRows);
-
-  usort($detalle, function($a,$b){
-    return strcmp($a['inicio'] ?? '', $b['inicio'] ?? '');
-  });
-
-$totalCaja = 0;
-  foreach($detalle as $m){
-    if(($m['tipo'] ?? '') === 'digital' && !$opts['sumar_digital_en_total']){ continue; }
-    $totalCaja += (int)($m['monto'] ?? 0);
-  }
-
-  return [$detalle, $totalCaja, $digitalTotal, $cantHab];
-}
 /* =================== AJAX de Turno de Caja =================== */
 
 if ($_SERVER['REQUEST_METHOD']==='GET' && isset($_GET['ajax_turno']) && $_GET['ajax_turno']=='1'){
   $cur = turnoActual($conn);
 
   $inicioArg = fmtHoraArg($cur['inicio']);
-  
-  list($detalle, $total,) = movimientosCajaConReglas($conn, $cur['inicio'], null, 300, [
-    'minibar_en_caja' => true,
-    'incluir_movs_digitales' => false,
-    'sumar_digital_en_total' => false
-  ]);
 
+
+list($total,) = cajaTotalDesdeHasta($conn, $cur['inicio']);
+  $detalle = cajaDetalleDesdeHasta($conn, $cur['inicio'], null, 300);
 
   echo json_encode([
     'ok' => 1,
@@ -726,7 +492,6 @@ if ($_SERVER['REQUEST_METHOD']==='GET' && isset($_GET['ajax_turno']) && $_GET['a
     'turno_txt' => turnoNombre($cur['turno']),
     'inicio_arg' => $inicioArg,
     'total' => $total,
-    'digital_total' => 0,
     'detalle' => $detalle
   ]);
   exit;
@@ -778,7 +543,7 @@ if($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion'])){
     }
 
     $ahora = nowUTCStrFromArg();
-    $st = $conn->prepare("UPDATE mensajes_internos SET estado='leido', updated_at=?, snooze_until=NULL WHERE id=?");
+    $st = $conn->prepare("UPDATE mensajes_internos SET estado='leido', updated_at=? WHERE id=?");
     $st->bind_param('si', $ahora, $id);
     $st->execute();
     $ok = $st->affected_rows > 0;
@@ -787,28 +552,12 @@ if($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion'])){
     echo json_encode(['ok'=>$ok ? 1 : 0]);
     exit;
   }
-  if ($accion === 'snooze_mensaje') {
-    $id = intval($_POST['id'] ?? 0);
-    if ($id <= 0) {
-      echo json_encode(['ok'=>0, 'error'=>'ID inválido']);
-      exit;
-    }
-    $ahora = nowUTCStrFromArg();
-    $future = (new DateTime($ahora, new DateTimeZone('UTC')))->modify('+1 minute')->format('Y-m-d H:i:s');
-    $st = $conn->prepare("UPDATE mensajes_internos SET snooze_until=?, updated_at=? WHERE id=?");
-    $st->bind_param('ssi', $future, $ahora, $id);
-    $st->execute();
-    $ok = $st->affected_rows > 0;
-    $st->close();
-    echo json_encode(['ok'=>$ok ? 1 : 0, 'next'=>$future]);
-    exit;
-  }
+  
   /* ===== BORRAR MOVIMIENTO (habitaciones o ventas) ===== */
   if ($accion === 'borrar_mov') {
     $clave = $_POST['clave'] ?? '';
     $id    = intval($_POST['id'] ?? 0);
     $tipo  = $_POST['tipo'] ?? '';
-    $habitacionId = null;
 
     if ($clave !== $CLAVE_ADMIN) {
       echo json_encode(['ok'=>0, 'error'=>'Clave incorrecta']);
@@ -821,13 +570,6 @@ if($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion'])){
     }
 
     if ($tipo === 'hab') {
-        $selHab = $conn->prepare("SELECT habitacion FROM historial_habitaciones WHERE id=? LIMIT 1");
-      $selHab->bind_param('i', $id);
-      $selHab->execute();
-      $habRow = $selHab->get_result()->fetch_assoc();
-      $habitacionId = $habRow ? (int)$habRow['habitacion'] : null;
-      $selHab->close();
-
       $stmt = $conn->prepare("DELETE FROM historial_habitaciones WHERE id=?");
     } elseif ($tipo === 'venta') {
       $stmt = $conn->prepare("DELETE FROM ventas_turno WHERE id=?");
@@ -839,36 +581,7 @@ if($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion'])){
     $stmt->bind_param("i", $id);
     $stmt->execute();
     $stmt->close();
-// Si se eliminó un movimiento de habitación, liberar la habitación si no quedan ocupaciones abiertas
-    if ($tipo === 'hab' && $habitacionId) {
-      $delCobro = $conn->prepare("DELETE FROM cobros_movimientos WHERE id=? AND tipo='hab'");
-      $delCobro->bind_param('i', $id);
-      $delCobro->execute();
-      $delCobro->close();
 
-      $open = $conn->prepare("SELECT estado, turno, hora_inicio, codigo FROM historial_habitaciones WHERE habitacion=? AND hora_fin IS NULL ORDER BY id DESC LIMIT 1");
-      $open->bind_param('i', $habitacionId);
-      $open->execute();
-      $openRow = $open->get_result()->fetch_assoc();
-      $open->close();
-
-      if ($openRow) {
-        $estadoHab = in_array($openRow['estado'] ?? '', ['ocupada','reservada','limpieza'], true) ? $openRow['estado'] : 'ocupada';
-        $turnoHab  = $openRow['turno'] ?? null;
-        $inicioHab = $openRow['hora_inicio'] ?? null;
-        $codigoHab = $openRow['codigo'] ?? null;
-
-        $upHab = $conn->prepare("UPDATE habitaciones SET estado=?, tipo_turno=?, hora_inicio=?, codigo_reserva=? WHERE id=?");
-        $upHab->bind_param('ssssi', $estadoHab, $turnoHab, $inicioHab, $codigoHab, $habitacionId);
-        $upHab->execute();
-        $upHab->close();
-      } else {
-        $upHab = $conn->prepare("UPDATE habitaciones SET estado='limpieza', tipo_turno=NULL, hora_inicio=NULL, codigo_reserva=NULL WHERE id=?");
-        $upHab->bind_param('i', $habitacionId);
-        $upHab->execute();
-        $upHab->close();
-      }
-    }
     echo json_encode(['ok'=>1]);
     exit;
   }
@@ -937,13 +650,13 @@ if($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion'])){
         $u=$conn->prepare("UPDATE historial_habitaciones SET estado='ocupada' WHERE habitacion=? AND hora_fin IS NULL");
         $u->bind_param('i',$id); $u->execute(); $u->close();
       } else {
-        $st=$conn->prepare("UPDATE habitaciones SET estado=?, tipo_turno=NULL, hora_inicio=NULL, codigo_reserva=NULL WHERE id=?");
+        $st=$conn->prepare("UPDATE habitaciones SET estado=?, tipo_turno=NULL, hora_inicio=NULL WHERE id=?");
         $st->bind_param('si',$estado,$id); $st->execute(); $st->close();
       }
     }
     echo json_encode(['success'=>true]); exit;
   }
-    if ($accion === 'mover_reserva') {
+if ($accion === 'mover_reserva') {
     $desde = intval($_POST['desde'] ?? 0);
     $hasta = intval($_POST['hasta'] ?? 0);
 
@@ -959,7 +672,7 @@ if($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion'])){
       exit;
     }
 
-    $q = $conn->prepare("SELECT estado, tipo_turno, hora_inicio, codigo_reserva FROM habitaciones WHERE id=?");
+    $q = $conn->prepare("SELECT estado, tipo_turno, hora_inicio FROM habitaciones WHERE id=?");
     $q->bind_param('i', $desde);
     $q->execute();
     $orig = $q->get_result()->fetch_assoc();
@@ -970,147 +683,52 @@ if($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion'])){
       exit;
     }
 
-    $reservaSt = $conn->prepare("SELECT id, turno, hora_inicio, bloques, precio_aplicado, es_extra, codigo, tipo FROM historial_habitaciones WHERE habitacion=? AND estado='reservada' AND hora_fin IS NULL ORDER BY id DESC LIMIT 1");
-    $reservaSt->bind_param('i', $desde);
-    $reservaSt->execute();
-    $reserva = $reservaSt->get_result()->fetch_assoc();
-    $reservaSt->close();
-
-    if(!$reserva){
-      echo json_encode(['success'=>false,'error'=>'No se encontró la reserva abierta']);
-      exit;
-    }
-
-    $codigo = $reserva['codigo'] ?? ($orig['codigo_reserva'] ?? null);
-    $turnoReserva = $reserva['turno'] ?? null;
-    $bloquesReserva = max(1, intval($reserva['bloques'] ?? 1));
-    $precioReserva = (int)($reserva['precio_aplicado'] ?? 0);
-    $esExtraReserva = (int)($reserva['es_extra'] ?? 0);
-    if(!$turnoReserva){
-      echo json_encode(['success'=>false,'error'=>'La reserva no tiene turno asignado']);
-      exit;
-    }
-
-    $q = $conn->prepare("SELECT estado, tipo_turno, hora_inicio FROM habitaciones WHERE id=?");
+    $q = $conn->prepare("SELECT estado FROM habitaciones WHERE id=?");
     $q->bind_param('i', $hasta);
     $q->execute();
     $dest = $q->get_result()->fetch_assoc();
     $q->close();
 
-    $estadoDest = $dest['estado'] ?? 'libre';
-    $estadoReserva = 'reservada';
-    $nowArgTs = nowArgDT()->getTimestamp();
-    $startReservaTs = toArgTs($reserva['hora_inicio'] ?? null);
-    if($startReservaTs === null){ $startReservaTs = $nowArgTs; }
-
-    $endReservaTs = turnoEndArgTs($turnoReserva, $startReservaTs, $bloquesReserva);
-    $durReserva = ($endReservaTs!==null && $startReservaTs!==null) ? max(0, $endReservaTs - $startReservaTs) : 0;
-    if($durReserva<=0){
-      if($turnoReserva==='turno-2h'){ $durReserva = 7200 * $bloquesReserva; }
-      elseif($turnoReserva==='turno-3h'){ $durReserva = 10800 * $bloquesReserva; }
-      elseif(in_array($turnoReserva, ['noche','noche-finde','noche-find'], true)){
-        $finNoche = nightEndTsFromStartArg($startReservaTs);
-        $durReserva = max(0, $finNoche - $startReservaTs);
-      }
-    }
-    if($durReserva<=0){ $durReserva = max(1, abs($nowArgTs - $startReservaTs)); }
-    
-    $remainingReserva = ($endReservaTs!==null) ? ($endReservaTs - $nowArgTs) : $durReserva;
-    $elapsedReserva = max(0, $nowArgTs - $startReservaTs);
-
-    $startDestTs = null; $remainingDestino = 0; $elapsedDest = null; $curOpen = null;
-    if($estadoDest === 'ocupada' || $estadoDest === 'reservada'){
-      $open = $conn->prepare("SELECT id, turno, hora_inicio, bloques FROM historial_habitaciones WHERE habitacion=? AND hora_fin IS NULL ORDER BY id DESC LIMIT 1");
-      $open->bind_param('i',$hasta);
-      $open->execute();
-      $curOpen = $open->get_result()->fetch_assoc();
-      $open->close();
-
-      $startDestTs = toArgTs($curOpen['hora_inicio'] ?? null);
-      $endDestTs = $startDestTs ? turnoEndArgTs($curOpen['turno'] ?? '', $startDestTs, $curOpen['bloques'] ?? 1) : null;
-      $remainingDestino = $endDestTs!==null ? ($endDestTs - $nowArgTs) : 0;
-      if($startDestTs !== null){ $elapsedDest = max(0, $nowArgTs - $startDestTs); }
-
-      if(!empty($curOpen['id'])){
-          $endUTC = nowUTCStrFromArg();
-        $mins = ($startDestTs!==null)
-          ? max(0, intval(round(($nowArgTs - $startDestTs) / 60)))
-          : 0;
-
-        $close = $conn->prepare("UPDATE historial_habitaciones SET hora_fin=?, duracion_minutos=? WHERE id=?");
-        $close->bind_param('sii',$endUTC,$mins,$curOpen['id']);
-        $close->execute();
-        $close->close();
-      }
-
-      $estadoReserva = 'ocupada';
-    } elseif($estadoDest === 'limpieza'){
-      $estadoReserva = 'ocupada';
-    } elseif($estadoDest === 'libre'){
-      $estadoReserva = 'reservada';
-    } else {
+    if (($dest['estado'] ?? '') !== 'libre') {
       echo json_encode(['success' => false, 'error' => 'La habitación destino no está disponible']);
       exit;
     }
 
-    $shouldSkipSum = ($estadoDest === 'ocupada' && $elapsedReserva <= 900 && $elapsedDest !== null && $elapsedDest <= 900);
-    if($estadoDest !== 'ocupada'){ $shouldSkipSum = false; }
+    $turno = $orig['tipo_turno'] ?? null;
+    $horaInicio = $orig['hora_inicio'] ?? null;
 
-    $combinedRemaining = $remainingReserva;
-    if($estadoDest === 'ocupada' || $estadoDest === 'reservada'){
-      $combinedRemaining = $shouldSkipSum ? $remainingDestino : ($remainingReserva + $remainingDestino);
-    }
-
-    $startReservaTs = $nowArgTs + ($combinedRemaining - $durReserva);
-    $inicioReservaUTC = gmdate('Y-m-d H:i:s', $startReservaTs);
-    $fechaRegistro = argDateFromTs($startReservaTs);
-
-    if($shouldSkipSum && $precioReserva>0){
-      $ajHoraUTC = nowUTCStrFromArg();
-      $ajFecha = argDateFromTs($nowArgTs);
-      $ajPrecio = -1 * abs($precioReserva);
-      $ajEstado = 'ajuste';
-      $ajTurno = 'ajuste';
-      $ajDuracion = 0;
-      $ajTipo = $tipoDesde;
-      $ajExtra = 0; $ajBloq = 1;
-
-      $ajuste = $conn->prepare("INSERT INTO historial_habitaciones (habitacion, tipo, estado, turno, hora_inicio, hora_fin, duracion_minutos, fecha_registro, precio_aplicado, es_extra, bloques) VALUES (?,?,?,?,?,?,?,?,?,?,?)");
-      $ajuste->bind_param('isssssisiii',$hasta,$ajTipo,$ajEstado,$ajTurno,$ajHoraUTC,$ajHoraUTC,$ajDuracion,$ajFecha,$ajPrecio,$ajExtra,$ajBloq);
-      $ajuste->execute();
-      $ajuste->close();
-    }
-
-    $horasExtra = $combinedRemaining > 0 ? round($combinedRemaining / 3600, 2) : 0;
-    $updHist = $conn->prepare("UPDATE historial_habitaciones SET habitacion=?, tipo=?, estado=?, turno=?, hora_inicio=?, fecha_registro=?, codigo=?, bloques=?, hora_fin=NULL, duracion_minutos=NULL, precio_aplicado=?, es_extra=? WHERE id=?");
-    $updHist->bind_param('issssssiiii', $hasta, $tipoDesde, $estadoReserva, $turnoReserva, $inicioReservaUTC, $fechaRegistro, $codigo, $bloquesReserva, $precioReserva, $esExtraReserva, $reserva['id']);
-    $updHist->execute();
-    $updHist->close();
-
-
-    $nuevoEstado = $estadoReserva === 'ocupada' ? 'ocupada' : 'reservada';
-    $upDest = $conn->prepare("UPDATE habitaciones SET estado=?, tipo_turno=?, hora_inicio=?, codigo_reserva=? WHERE id=?");
-    $upDest->bind_param('ssssi', $nuevoEstado, $turnoReserva, $inicioReservaUTC, $codigo, $hasta);
+    $upDest = $conn->prepare("UPDATE habitaciones SET estado='reservada', tipo_turno=?, hora_inicio=? WHERE id=?");
+    $upDest->bind_param('ssi', $turno, $horaInicio, $hasta);
     $upDest->execute();
     $upDest->close();
 
-    $upOrig = $conn->prepare("UPDATE habitaciones SET estado='libre', tipo_turno=NULL, hora_inicio=NULL, codigo_reserva=NULL WHERE id=?");
+    $upOrig = $conn->prepare("UPDATE habitaciones SET estado='libre', tipo_turno=NULL, hora_inicio=NULL WHERE id=?");
     $upOrig->bind_param('i', $desde);
     $upOrig->execute();
     $upOrig->close();
 
-    echo json_encode(['success' => true, 'destino' => $nuevoEstado, 'horas' => $horasExtra, 'turno' => $turnoReserva]);
+    $updHist = $conn->prepare("UPDATE historial_habitaciones SET habitacion=?, tipo=? WHERE habitacion=? AND hora_fin IS NULL AND estado='reservada'");
+    $updHist->bind_param('isi', $hasta, $tipoDesde, $desde);
+    $updHist->execute();
+    $updHist->close();
+
+    echo json_encode(['success' => true]);
     exit;
   }
  if($accion==='ocupar_turno'){ // agregar bloque (acumulable)
     $ids = array_filter(array_map('intval', explode(',', $_POST['ids'] ?? '')));
     $blockHours = turnoBlockHoursForToday();
     $turnoTag = $blockHours===2 ? 'turno-2h' : 'turno-3h';
-    $nowArgTs = nowArgDT()->getTimestamp();
-    $startUTC = gmdate('Y-m-d H:i:s', $nowArgTs);
-    $fecha    = argDateFromTs($nowArgTs);
+    $startUTC = nowUTCStrFromArg();
+    $fecha    = argDateToday();
 
     foreach($ids as $id){
+        // si tiene noche abierta, no sumar
+        $chk = $conn->prepare("SELECT COUNT(*) c FROM historial_habitaciones WHERE habitacion=? AND turno IN ('noche','noche-finde') AND hora_fin IS NULL");
+        $chk->bind_param('i',$id); $chk->execute();
+        $res=$chk->get_result()->fetch_assoc();
+        $chk->close();
+        if(($res['c']??0)>0){ continue; }
 
         $tipoHab = tipoDeHabitacion($id,$SUPER_VIP,$VIP_LIST);
         $estado='ocupada';
@@ -1118,54 +736,22 @@ if($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion'])){
         $inicioHabitacion = $startUTC;
 
         // ¿Hay una ocupación abierta? entonces sumamos bloques en el mismo registro
-        $open = $conn->prepare("SELECT id, turno, hora_inicio, bloques, precio_aplicado, es_extra FROM historial_habitaciones WHERE habitacion=? AND hora_fin IS NULL ORDER BY id DESC LIMIT 1");
+        $open = $conn->prepare("SELECT id, turno, hora_inicio, bloques FROM historial_habitaciones WHERE habitacion=? AND hora_fin IS NULL ORDER BY id DESC LIMIT 1");
         $open->bind_param('i',$id);
         $open->execute();
         $curOpen = $open->get_result()->fetch_assoc();
         $open->close();
 
         if($curOpen){
-            
             $turnoHabitacion = $curOpen['turno'] ?? $turnoTag;
             $inicioHabitacion = $curOpen['hora_inicio'] ?? $startUTC;
-            $startArgTs = toArgTs($inicioHabitacion);
-            $bloquesAbiertos = max(1, (int)($curOpen['bloques'] ?? 1));
+            $bloquesActuales = max(1,(int)($curOpen['bloques'] ?? 1)) + 1;
+            $precioExtra = precioVigenteInt($conn, $tipoHab, $turnoHabitacion);
 
-           // Si el turno de caja cambió, cerrar el registro anterior y crear uno nuevo para la extensión
-            $turnoCaja = turnoActual($conn);
-            $cajaStartTs = toArgTs($turnoCaja['inicio'] ?? null);
-            if($cajaStartTs !== null && $startArgTs !== null && $cajaStartTs > $startArgTs){
-              $finPrevUTC = nowUTCStrFromArg();
-              $minutosPrev = max(0, intval(round(($nowArgTs - $startArgTs) / 60)));
-              $closePrev = $conn->prepare("UPDATE historial_habitaciones SET hora_fin=?, duracion_minutos=? WHERE id=?");
-              $closePrev->bind_param('sii', $finPrevUTC, $minutosPrev, $curOpen['id']);
-              $closePrev->execute();
-              $closePrev->close();
-
-              $precio = precioVigenteInt($conn, $tipoHab, $turnoTag);
-              $fecha = argDateFromTs($nowArgTs);
-              $ins=$conn->prepare("INSERT INTO historial_habitaciones (habitacion,tipo,estado,turno,hora_inicio,fecha_registro,precio_aplicado,es_extra,bloques)
-                               VALUES (?,?,?,?,?,?,?,1,1)");
-              $ins->bind_param('isssssi',$id,$tipoHab,$estado,$turnoTag,$startUTC,$fecha,$precio);
-              $ins->execute();
-              $ins->close();
-
-              $turnoHabitacion = $turnoTag;
-              $inicioHabitacion = $startUTC;
-            } else {
-              $precio = precioVigenteInt($conn, $tipoHab, $turnoHabitacion);
-              $precioTotal = (int)($curOpen['precio_aplicado'] ?? 0) + $precio;
-              $bloquesTotales = $bloquesAbiertos + 1;
-
-              $upd = $conn->prepare("UPDATE historial_habitaciones SET bloques=?, precio_aplicado=?, es_extra=1 WHERE id=?");
-              $upd->bind_param('iii', $bloquesTotales, $precioTotal, $curOpen['id']);
-              $upd->execute();
-              $upd->close();
-
-              if($startArgTs){
-                $fecha = argDateFromTs($startArgTs);
-              }
-            }
+            $upd = $conn->prepare("UPDATE historial_habitaciones SET bloques=?, precio_aplicado = COALESCE(precio_aplicado,0)+? WHERE id=?");
+            $upd->bind_param('iii',$bloquesActuales,$precioExtra,$curOpen['id']);
+            $upd->execute();
+            $upd->close();
         } else {
             // precio vigente congelado
             $precio = precioVigenteInt($conn, $tipoHab, $turnoTag);
@@ -1260,30 +846,46 @@ if($accion==='reactivar_extra'){
     $inicioHabitacion = $startUTC;
 
 if($curOpen){
-        $startArgTs = toArgTs($curOpen['hora_inicio'] ?? null);
-        $endArgTs = $startArgTs ? turnoEndArgTs($curOpen['turno'] ?? '', $startArgTs, $curOpen['bloques'] ?? 1) : null;
-        $endUTC = $endArgTs ? gmdate('Y-m-d H:i:s', $endArgTs) : $startUTC;
-        $mins = ($startArgTs!==null && $endArgTs!==null)
-          ? max(0, intval(round(($endArgTs - $startArgTs) / 60)))
-          : 0;
+        $turnoAbierto = $curOpen['turno'] ?? '';
+        $esNocheAbierta = in_array($turnoAbierto, ['noche','noche-finde','noche-find'], true);
 
-        $close = $conn->prepare("UPDATE historial_habitaciones SET hora_fin=?, duracion_minutos=? WHERE id=?");
-        $close->bind_param('sii',$endUTC,$mins,$curOpen['id']);
-        $close->execute();
-        $close->close();
+        if($esNocheAbierta){
+            $endUTC = $startUTC;
+            $startArgTs = toArgTs($curOpen['hora_inicio'] ?? null);
+            $endArgTs   = toArgTs($endUTC);
+            $mins = ($startArgTs!==null && $endArgTs!==null)
+              ? max(0, intval(round(($endArgTs - $startArgTs) / 60)))
+              : 0;
+
+            $close = $conn->prepare("UPDATE historial_habitaciones SET hora_fin=?, duracion_minutos=? WHERE id=?");
+            $close->bind_param('sii',$endUTC,$mins,$curOpen['id']);
+            $close->execute();
+            $close->close();
+
+            $turnoHabitacion = $turnoTag;
+            $inicioHabitacion = $startUTC;
+            $curOpen = null; // crea un nuevo bloque extra con turno standard
+        }
     }
 
-    $turnoHabitacion = $turnoTag;
-    $inicioHabitacion = $endUTC ?? $startUTC;
-    if(isset($endArgTs) && $endArgTs){
-      $fecha = argDateFromTs($endArgTs);
+    if($curOpen){
+        $turnoHabitacion = $curOpen['turno'] ?? $turnoTag;
+        $inicioHabitacion = $curOpen['hora_inicio'] ?? $startUTC;
+        $bloquesActuales = max(1,(int)($curOpen['bloques'] ?? 1)) + 1;
+        $precioExtra = precioVigenteInt($conn, $tipoHab, $turnoHabitacion);
+
+        $upd = $conn->prepare("UPDATE historial_habitaciones SET bloques=?, precio_aplicado = COALESCE(precio_aplicado,0)+?, es_extra=1 WHERE id=?");
+        $upd->bind_param('iii',$bloquesActuales,$precioExtra,$curOpen['id']);
+        $upd->execute();
+        $upd->close();
+    } else {
+        $estado='ocupada';
+        $ins=$conn->prepare("INSERT INTO historial_habitaciones (habitacion,tipo,estado,turno,hora_inicio,fecha_registro,precio_aplicado,es_extra,bloques)
+                         VALUES (?,?,?,?,?,?,?,1,1)");
+        $ins->bind_param('isssssi',$id,$tipoHab,$estado,$turnoTag,$startUTC,$fecha,$precio);
+        $ins->execute();
+        $ins->close();
     }
-    $estado='ocupada';
-    $ins=$conn->prepare("INSERT INTO historial_habitaciones (habitacion,tipo,estado,turno,hora_inicio,fecha_registro,precio_aplicado,es_extra,bloques)
-                     VALUES (?,?,?,?,?,?,?,1,1)");
-    $ins->bind_param('isssssi',$id,$tipoHab,$estado,$turnoTag,$inicioHabitacion,$fecha,$precio);
-    $ins->execute();
-    $ins->close();
 
     // Asegurar que la habitación quede marcada como ocupada y con inicio correcto
     $st=$conn->prepare("UPDATE habitaciones SET estado='ocupada', tipo_turno=?, hora_inicio=? WHERE id=?");
@@ -1305,11 +907,8 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion']) && $_POST['ac
   $ahoraUTC = nowUTCStrFromArg();
 
   // Resumen del turno que se cierra
-  list($detalle,$total,, $cant) = movimientosCajaConReglas($conn,$cur['inicio'],$ahoraUTC,150,[
-    'minibar_en_caja' => true,
-    'incluir_movs_digitales' => false,
-    'sumar_digital_en_total' => false
-  ]);
+  list($total,$cant) = cajaTotalDesdeHasta($conn,$cur['inicio'],$ahoraUTC);
+  $detalle = cajaDetalleDesdeHasta($conn,$cur['inicio'],$ahoraUTC,150);
 
   // Guardar cierre en historial_turnos
   $st = $conn->prepare("INSERT INTO historial_turnos (turno,inicio,fin,total,ocupaciones) VALUES (?,?,?,?,?)");
@@ -1351,7 +950,7 @@ if ($view !== 'reportes') {
 }
 /*=================== Estados iniciales =================*/
 $states = [];
-$rs = $conn->query("SELECT id, estado, tipo_turno, hora_inicio, codigo_reserva FROM habitaciones ORDER BY id ASC");
+$rs = $conn->query("SELECT id, estado, tipo_turno, hora_inicio FROM habitaciones ORDER BY id ASC");
 while($r=$rs->fetch_assoc()){
   $id=(int)$r['id'];
   $states[$id]=$r;
@@ -1512,21 +1111,6 @@ header{position:sticky;top:0;z-index:5;background:#fff;border-bottom:1px solid v
 
 /* Número de habitación */
 .room-num{font-weight:800;font-size:12px}
-.room-code{
-  font-size:11px;
-  font-weight:800 !important;
-  padding:2px 6px;
-  border-radius:999px;
-  background:rgba(255,255,255,0.8);
-  color:#4c1d95 !important;
-  letter-spacing:.04em;
-}
-.room-card.reservada .room-code,
-.room-card.ocupada .room-code{
-  background:#f5f3ff;
-  color:#4c1d95 !important;
-  box-shadow:0 0 0 1px rgba(76,29,149,0.2);
-}
 
 /* Tipo de habitación (afuera, solo desktop) */
 .room-kind{display:none}
@@ -1865,17 +1449,7 @@ html, body { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grays
   padding-left: 12px;
   text-align: left;
 }
-.minutos-alerta{
-  color:#b91c1c;
-  font-weight:700;
-}
-.fila-alerta{
-  background:#fef2f2;
-}
-.nota-extra{
-  color:#0b5fff;
-  font-weight:600;
-}
+
 /* ======== MODO TARJETAS EN CELULAR ======== */
 @media (max-width: 768px) {
   /* Oculta la tabla y genera tarjetas desde el DOM */
@@ -1964,7 +1538,6 @@ html, body { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grays
     <div class="nav">
         <button class="<?php echo ($view==='panel'?'active':''); ?>" onclick="location.href='?view=panel'">Panel</button>
         <button class="<?php echo ($view==='reportes'?'active':''); ?>" onclick="location.href='?view=reportes'">Reportes</button>
-        <button class="<?php echo ($view==='reportes-empleadas'?'active':''); ?>" onclick="location.href='?view=reportes-empleadas'">Reporte empleadas</button>
         <button onclick="window.open('https://lamoradatandil.com/inventario.php', '_blank')">Inventario</button>
         <button class="<?php echo ($view==='valores'?'active':''); ?>" onclick="location.href='?view=valores'">Editar valores</button>
       <div class="clock" id="arg-clock">--:--:--</div>
@@ -1976,7 +1549,6 @@ html, body { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grays
 <div id="mobile-menu">
   <button onclick="location.href='?view=panel'">Panel</button>
   <button onclick="location.href='?view=valores'">Editar valores</button>
-  <button onclick="location.href='?view=reportes-empleadas'">Reporte empleadas</button>
   <button onclick="location.href='?view=reportes'">Reportes</button>
   <button onclick="window.open('https://lamoradatandil.com/inventario.php','_blank')">Inventario</button>
 </div>
@@ -1987,235 +1559,6 @@ document.getElementById('menu-toggle').addEventListener('click', function(){
   menu.style.display = (menu.style.display === 'block') ? 'none' : 'block';
 });
 </script>
-<?php if($view==='reportes-empleadas'): ?>
-<?php
-$fechaFiltro = preg_replace('/[^0-9\\-]/','', $_GET['fecha'] ?? argDateToday());
-if($fechaFiltro===''){ $fechaFiltro = argDateToday(); }
-
-$st = $conn->prepare("SELECT id, habitacion, turno, hora_inicio, hora_fin, duracion_minutos, es_extra, bloques FROM historial_habitaciones WHERE fecha_registro=? ORDER BY habitacion ASC, hora_inicio ASC");
-$st->bind_param('s',$fechaFiltro);
-$st->execute();
-$res = $st->get_result();
-$reporteEmpleadas = [];
-$turnosCerrados = [];
-$nowTs = nowArgDT()->getTimestamp();
-while($r=$res->fetch_assoc()){
-  $inicioTs = toArgTs($r['hora_inicio']);
-  $esperadoFinTs = $inicioTs!==null ? turnoEndArgTs($r['turno'], $inicioTs, $r['bloques'] ?? 1) : null;
-  $finTs = $r['hora_fin'] ? toArgTs($r['hora_fin']) : $nowTs;
-  $minutos = ($r['duracion_minutos'] !== null) ? (int)$r['duracion_minutos'] : (($inicioTs!==null && $finTs!==null) ? max(0, (int)round(($finTs - $inicioTs) / 60)) : 0);
-
-  list($proximaExtraTs,$proximaExtraTurno) = proximaExtra($conn,(int)$r['habitacion'],$r['hora_inicio']);
-  $tieneExtra = $proximaExtraTs !== null && ($esperadoFinTs === null || $proximaExtraTs <= $esperadoFinTs + 10800);
-
-  $nota = '';
-  if((int)$r['es_extra'] === 1){
-    $nota = 'Turno extra / reactivado';
-  } elseif($tieneExtra){
-    $nota = 'Extendido con turno extra'.($proximaExtraTurno ? ' ('.turnoLabelCorto($proximaExtraTurno).')' : '');
-  }
-
-  $alerta = false;
-  if($esperadoFinTs!==null){
-    if(in_array($r['turno'], ['turno-2h','turno-3h'], true)){
-      $alerta = !$tieneExtra && ($finTs > $esperadoFinTs + (15 * 60));
-    } elseif(in_array($r['turno'], ['noche','noche-finde','noche-find'], true)){
-      $abierta = empty($r['hora_fin']);
-      $alerta = !$tieneExtra && (($abierta && $nowTs > $esperadoFinTs) || (!$abierta && $finTs > $esperadoFinTs));
-    }
-  }
-
-  $reporteEmpleadas[] = [
-    'habitacion'=>(int)$r['habitacion'],
-    'turno'=>turnoLabelCorto($r['turno']),
-    'inicio'=>fmtHoraArg($r['hora_inicio']),
-    'fin'=>$r['hora_fin'] ? fmtHoraArg($r['hora_fin']) : 'En curso',
-    'minutos'=>$minutos,
-    'nota'=>$nota,
-    'alerta'=>$alerta
-  ];
-}
-$st->close();
-// Turnos cerrados en la fecha seleccionada (vista para empleadas)
-$stTurnos = $conn->prepare("
-  SELECT turno, inicio, fin, total, ocupaciones, COALESCE(fin, inicio) AS fecha_reporte
-  FROM historial_turnos
-  WHERE DATE(COALESCE(fin, inicio)) = ?
-  ORDER BY COALESCE(fin, inicio) DESC
-");
-$stTurnos->bind_param('s', $fechaFiltro);
-$stTurnos->execute();
-$resTurnos = $stTurnos->get_result();
-while($row = $resTurnos->fetch_assoc()){
-  $turnosCerrados[] = $row;
-}
-$stTurnos->close();
-?>
-<main class="container">
-  <div class="card" style="margin-top:20px;">
-    <h2 style="margin-top:0">📝 Reporte diario para empleadas</h2>
-    <p style="color:#4b5563;">Turnos registrados en la fecha seleccionada. Los minutos se remarcan en rojo solo si superan el límite sin un turno extra o reactivación posterior.</p>
-    <form method="get" style="display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end; margin-bottom:12px;">
-      <input type="hidden" name="view" value="reportes-empleadas">
-      <label>Fecha
-        <input type="date" name="fecha" value="<?= safe($fechaFiltro) ?>">
-      </label>
-      <button type="submit">Ver reporte</button>
-    </form>
-    <style>
-      .table-sortable th {
-        cursor: pointer;
-        user-select: none;
-        position: relative;
-      }
-      .table-sortable th[data-sort-direction="asc"]::after {
-        content: "▲";
-        position: absolute;
-        right: 8px;
-        font-size: 11px;
-        color: #6b7280;
-      }
-      .table-sortable th[data-sort-direction="desc"]::after {
-        content: "▼";
-        position: absolute;
-        right: 8px;
-        font-size: 11px;
-        color: #6b7280;
-      }
-    </style>
-    <div class="table-container">
-      <table class="table table-sortable" id="tabla-reporte-empleadas">
-        <thead>
-          <tr>
-            <th data-sort-key="habitacion">Habitación</th>
-            <th data-sort-key="turno">Turno</th>
-            <th data-sort-key="inicio">Inicio</th>
-            <th data-sort-key="fin">Fin</th>
-            <th data-sort-key="minutos">Minutos</th>
-            <th data-sort-key="nota">Nota</th>
-          </tr>
-        </thead>
-        <tbody>
-          <?php if(empty($reporteEmpleadas)): ?>
-            <tr><td colspan="6" style="text-align:center;padding:10px;color:#6b7280;">Sin movimientos para esta fecha.</td></tr>
-          <?php else: foreach($reporteEmpleadas as $row): ?>
-            <tr class="<?= $row['alerta'] ? 'fila-alerta' : '' ?>">
-              <td>Hab. <?= $row['habitacion'] ?></td>
-              <td><?= safe($row['turno']) ?></td>
-              <td><?= safe($row['inicio']) ?></td>
-              <td><?= safe($row['fin']) ?></td>
-              <td><span class="<?= $row['alerta'] ? 'minutos-alerta' : '' ?>"><?= (int)$row['minutos'] ?> min</span></td>
-              <td><?= $row['nota'] ? '<span class="nota-extra">'.safe($row['nota']).'</span>' : '-' ?></td>
-            </tr>
-          <?php endforeach; endif; ?>
-        </tbody>
-      </table>
-    </div>
-  </div>
-  <div class="card" style="margin-top:16px;">
-    <h3 style="margin:0 0 8px 0;">📦 Caja de turnos cerrados (empleadas)</h3>
-    <p style="color:#4b5563;font-size:14px;">Cada cierre aparece separado usando la hora de cierre real.</p>
-    <?php if(empty($turnosCerrados)): ?>
-      <div style="color:#6b7280;">No hay cierres en esta fecha.</div>
-    <?php else: ?>
-      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px;">
-        <?php foreach($turnosCerrados as $t): ?>
-          <div style="border:1px solid #e5e7eb;border-radius:10px;padding:10px;background:#fff;">
-            <div style="font-weight:700;"><?= turnoNombre($t['turno']) ?></div>
-            <div style="color:#6b7280;font-size:13px;"><?= fmtFechaArg($t['fecha_reporte']) ?></div>
-            <div style="margin-top:6px;font-size:14px;">
-              <div>Inicio: <strong><?= fmtHoraArg($t['inicio']) ?></strong></div>
-              <div>Fin: <strong><?= fmtHoraArg($t['fin']) ?></strong></div>
-              <div>Ocupaciones: <strong><?= (int)$t['ocupaciones'] ?></strong></div>
-              <div>Total: <strong>$ <?= number_format((int)$t['total'],0,',','.') ?></strong></div>
-            </div>
-          </div>
-        <?php endforeach; ?>
-      </div>
-    <?php endif; ?>
-  </div>
-  <script>
-    (function() {
-      const table = document.getElementById('tabla-reporte-empleadas');
-      if (!table) return;
-
-      const tbody = table.querySelector('tbody');
-      const headers = table.querySelectorAll('th[data-sort-key]');
-      const parseTimeToMinutes = (text) => {
-        const match = text.match(/(\d{1,2}):(\d{2})/);
-        if (!match) return null;
-        const hours = parseInt(match[1], 10);
-        const minutes = parseInt(match[2], 10);
-        return (hours * 60) + minutes;
-      };
-
-      const normalizeValue = (row, key, index) => {
-        const text = (row.cells[index]?.textContent || '').trim();
-        switch (key) {
-          case 'habitacion':
-            return parseInt(text.replace(/\D+/g, ''), 10) || 0;
-          case 'turno':
-            return text.toLowerCase();
-          case 'inicio':
-          case 'fin': {
-            const t = parseTimeToMinutes(text);
-            return (t !== null) ? t : Number.POSITIVE_INFINITY;
-          }
-          case 'minutos':
-            return parseInt(text.replace(/\D+/g, ''), 10) || 0;
-          case 'nota':
-            return text.toLowerCase();
-          default:
-            return text.toLowerCase();
-        }
-      };
-
-      let sortState = { key: null, direction: null };
-
-      const updateIndicators = () => {
-        headers.forEach((th) => {
-          if (th.dataset.sortKey === sortState.key) {
-            th.setAttribute('data-sort-direction', sortState.direction);
-          } else {
-            th.removeAttribute('data-sort-direction');
-          }
-        });
-      };
-
-      const sortRows = (key, index) => {
-        const nextDirection = (sortState.key === key && sortState.direction === 'asc') ? 'desc' : 'asc';
-        sortState = { key, direction: nextDirection };
-
-        const rows = Array.from(tbody.querySelectorAll('tr'));
-        rows.sort((a, b) => {
-          const aVal = normalizeValue(a, key, index);
-          const bVal = normalizeValue(b, key, index);
-
-          let compare;
-          if (typeof aVal === 'number' && typeof bVal === 'number') {
-            compare = aVal - bVal;
-          } else {
-            compare = String(aVal).localeCompare(String(bVal), 'es', { sensitivity: 'base' });
-          }
-
-          return nextDirection === 'asc' ? compare : -compare;
-        });
-
-        tbody.innerHTML = '';
-        rows.forEach((row) => tbody.appendChild(row));
-        updateIndicators();
-      };
-
-      headers.forEach((th, index) => {
-        th.addEventListener('click', () => sortRows(th.dataset.sortKey, index));
-        th.title = 'Ordenar';
-      });
-    })();
-  </script>
-
-  <a href="?view=panel" style="display:block;margin-top:10px;color:#0B5FFF;text-decoration:none;">⬅ Volver al panel</a>
-</main>
-<?php endif; ?>
 
 <?php if($view==='valores'): ?>
 
@@ -2348,40 +1691,29 @@ if (!empty($_SESSION['reportes_ok'])) {
 $desde = preg_replace('/[^0-9\-]/','', $_GET['desde'] ?? '');
 $hasta = preg_replace('/[^0-9\-]/','', $_GET['hasta'] ?? '');
 
-$sql = "SELECT turno, inicio, fin, total, ocupaciones, COALESCE(fin, inicio) AS fecha_reporte
+$sql = "SELECT turno, inicio, fin, total, ocupaciones
         FROM historial_turnos
         WHERE 1";
 
 if ($desde !== '') {
-    $sql .= " AND DATE(COALESCE(fin, inicio)) >= '".$conn->real_escape_string($desde)."'";
+    $sql .= " AND DATE(inicio) >= '".$conn->real_escape_string($desde)."'";
 }
 
 if ($hasta !== '') {
-    $sql .= " AND DATE(COALESCE(fin, inicio)) <= '".$conn->real_escape_string($hasta)."'";
+    $sql .= " AND DATE(inicio) <= '".$conn->real_escape_string($hasta)."'";
 }
 
-$sql .= " ORDER BY COALESCE(fin, inicio) DESC";
+$sql .= " ORDER BY inicio DESC";
 
 $res = $conn->query($sql);
 $rows = [];
 while($r = $res->fetch_assoc()) { $rows[] = $r; }
-
 // Preparar reportes con movimientos calculados (una sola vez)
 $reportes = [];
 foreach ($rows as $r) {
-    $inicioTurno = $r['inicio'];
-    $finTurno = $r['fin'] ?? $r['inicio'];
-    list($movs, $totalTurno, $digitalTotal,) = movimientosCajaConReglas($conn, $inicioTurno, $finTurno, 500, [
-      'minibar_en_caja' => true,
-      'incluir_movs_digitales' => true,
-      'sumar_digital_en_total' => true
-    ]);
     $reportes[] = [
-        'data' => array_merge($r, [
-          'total_con_digital' => (int)$totalTurno,
-          'digital_total' => $digitalTotal
-        ]),
-        'movs' => $movs
+        'data' => $r,
+        'movs' => cajaDetalleDesdeHasta($conn, $r['inicio'], $r['fin'] ?? $r['inicio'], 500)
     ];
 }
 // Calcular total de caja del filtro seleccionado
@@ -2390,9 +1722,8 @@ $total_caja = 0;
 $total_ocupaciones = 0;
 $cantidad_turnos = count($rows);
 
-foreach ($reportes as $rep) {
-    $r = $rep['data'];
-    $total_caja += (int)($r['total_con_digital'] ?? $r['total']);
+foreach ($rows as $r) {
+    $total_caja += (int)$r['total'];
     $total_ocupaciones += (int)$r['ocupaciones'];
 }
 
@@ -2512,14 +1843,14 @@ $promedio_turno = ($cantidad_turnos > 0)
     <tbody>
     <?php if(empty($reportes)): ?>
       <tr><td colspan="6" style="padding:10px;text-align:center;color:#777;">Sin turnos cerrados todavía.</td></tr>
-   <?php else: foreach($reportes as $rep): $r=$rep['data']; $movs=$rep['movs']; $fechaRep = $r['fecha_reporte'] ?? ($r['fin'] ?? $r['inicio']); ?>
+   <?php else: foreach($reportes as $rep): $r=$rep['data']; $movs=$rep['movs']; ?>
   <tr>
-    <td><?= fmtFechaArg($fechaRep) ?></td>
+    <td><?= fmtFechaArg($r['inicio']) ?></td>
     <td><?= turnoNombre($r['turno']) ?></td>
     <td><?= fmtHoraArg($r['inicio']) ?></td>
     <td><?= fmtHoraArg($r['fin']) ?></td>
     <td><?= (int)$r['ocupaciones'] ?></td>
-    <td>$ <?= number_format((int)($r['total_con_digital'] ?? $r['total']),0,',','.') ?></td>
+    <td>$ <?= number_format((int)$r['total'],0,',','.') ?></td>
   </tr>
   <tr>
     <td colspan="6" style="background:#f8fafc;">
@@ -2538,24 +1869,17 @@ $promedio_turno = ($cantidad_turnos > 0)
               </tr>
             </thead>
             <tbody>
-              <?php foreach($movs as $m): $isDigital = ($m['tipo'] ?? '') === 'digital'; ?>
-                <tr style="<?= $isDigital ? 'background:#ecfdf3;' : '' ?>">
+              <?php foreach($movs as $m): ?>
+                <tr>
                   <td style="padding:4px 6px;">
                     <?php
-                      if(($m['tipo'] ?? '')==='venta')      echo safe($m['hab']);
-                      elseif(($m['tipo'] ?? '')==='ajuste') echo '💳 '.safe($m['hab']);
-                      elseif(($m['tipo'] ?? '')==='digital') echo '💳 '.safe($m['hab']);
-                      else                                   echo 'Hab. '.safe($m['hab']);
+                      if($m['tipo']==='venta')      echo safe($m['hab']);
+                      elseif($m['tipo']==='ajuste') echo '💳 '.safe($m['hab']);
+                      else                          echo 'Hab. '.safe($m['hab']);
                     ?>
-                    <?php if(!empty($m['descripcion'])): ?>
-                      <div style="color:#047857;font-size:12px;"><?= safe($m['descripcion']) ?></div>
-                    <?php endif; ?>
-                    <?php if(!empty($m['codigo'])): ?>
-                      <div style="color:#047857;font-size:11px;">Ref: <?= safe($m['codigo']) ?></div>
-                    <?php endif; ?>
                   </td>
                   <td style="padding:4px 6px;"><?= safe($m['inicio']) ?></td>
-                  <td style="padding:4px 6px; color:<?= ($m['monto']<0?'#b91c1c':($isDigital ? '#047857':'#111827')) ?>; text-align:right; font-weight:<?= $isDigital ? '700' : '400' ?>;">
+                  <td style="padding:4px 6px; color:<?= ($m['monto']<0?'#b91c1c':'#111827') ?>; text-align:right;">
                     $ <?= number_format($m['monto'],0,',','.') ?>
                   </td>
                 </tr>
@@ -2577,12 +1901,12 @@ $promedio_turno = ($cantidad_turnos > 0)
 <div class="report-cards">
   <?php if(empty($reportes)): ?>
     <div class="report-card" style="color:#6b7280;">Sin turnos cerrados todavía.</div>
-  <?php else: foreach($reportes as $rep): $r=$rep['data']; $movs=$rep['movs']; $fechaRep = $r['fecha_reporte'] ?? ($r['fin'] ?? $r['inicio']); ?>
+  <?php else: foreach($reportes as $rep): $r=$rep['data']; $movs=$rep['movs']; ?>
     <div class="report-card">
       <div class="report-card-header">
         <div>
           <div class="label">Fecha</div>
-          <div class="value"><?= fmtFechaArg($fechaRep) ?></div>
+          <div class="value"><?= fmtFechaArg($r['inicio']) ?></div>
         </div>
         <div>
           <div class="label">Turno</div>
@@ -2598,10 +1922,7 @@ $promedio_turno = ($cantidad_turnos > 0)
         </div>
         <div class="full">
           <div class="label">Total</div>
-          <div class="value">$ <?= number_format((int)($r['total_con_digital'] ?? $r['total']),0,',','.') ?></div>
-          <?php if(!empty($r['digital_total'])): ?>
-            <div class="label" style="color:#047857;">Incluye ingresos digitales: $ <?= number_format((int)round($r['digital_total']),0,',','.') ?></div>
-          <?php endif; ?>
+          <div class="value">$ <?= number_format((int)$r['total'],0,',','.') ?></div>
         </div>
         <div class="full" style="color:#6b7280; font-size:13px;">Ocupaciones: <?= (int)$r['ocupaciones'] ?></div>
       </div>
@@ -2621,24 +1942,17 @@ $promedio_turno = ($cantidad_turnos > 0)
               </tr>
             </thead>
             <tbody>
-              <?php foreach($movs as $m): $isDigital = ($m['tipo'] ?? '')==='digital'; ?>
-              <tr style="<?= $isDigital ? 'background:#ecfdf3;' : '' ?>">
+              <?php foreach($movs as $m): ?>
+              <tr>
                 <td>
                   <?php
-                    if(($m['tipo'] ?? '')==='venta')      echo safe($m['hab']);
-                    elseif(($m['tipo'] ?? '')==='ajuste') echo '💳 '.safe($m['hab']);
-                    elseif(($m['tipo'] ?? '')==='digital') echo '💳 '.safe($m['hab']);
-                    else                                   echo 'Hab. '.safe($m['hab']);
+                    if($m['tipo']==='venta')      echo safe($m['hab']);
+                    elseif($m['tipo']==='ajuste') echo '💳 '.safe($m['hab']);
+                    else                          echo 'Hab. '.safe($m['hab']);
                   ?>
-                  <?php if(!empty($m['descripcion'])): ?>
-                    <div style="color:#047857;font-size:12px;"><?= safe($m['descripcion']) ?></div>
-                  <?php endif; ?>
-                  <?php if(!empty($m['codigo'])): ?>
-                    <div style="color:#047857;font-size:11px;">Ref: <?= safe($m['codigo']) ?></div>
-                  <?php endif; ?>
                 </td>
                 <td><?= safe($m['inicio']) ?></td>
-                <td style="text-align:right; color:<?= ($m['monto']<0?'#b91c1c':($isDigital?'#047857':'#111827')) ?>;">$ <?= number_format($m['monto'],0,',','.') ?></td>
+                <td style="text-align:right; color:<?= ($m['monto']<0?'#b91c1c':'#111827') ?>;">$ <?= number_format($m['monto'],0,',','.') ?></td>
               </tr>
               <?php endforeach; ?>
             </tbody>
@@ -2670,20 +1984,16 @@ $promedio_turno = ($cantidad_turnos > 0)
       <?php foreach(range(40,21) as $id):
         $s=$states[$id] ?? ['estado'=>'libre'];
         $estado=$s['estado']; $tipo=tipoDeHabitacion($id,$SUPER_VIP,$VIP_LIST);
-        $codigo=trim($s['codigo_reserva'] ?? '');
         $rest = sumRemainingForRoom($conn,$id);
         $estadoTxt = ($estado==='libre'?'Disponible':($estado==='limpieza'?'Limpieza':($estado==='reservada'?'Reservada':'Ocupada')));
         $timer = formatTimerLabel($rest, $estado);
         $isSuper = in_array($id,$SUPER_VIP);
       ?>
       <div class="room-wrap">
-        <div class="room-card <?= $estado ?> <?= $isSuper?'super':'' ?>" id="hab-<?= $id ?>" data-id="<?= $id ?>" data-restante="<?= $rest ?>" data-tipo="<?= $tipo ?>" data-codigo="<?= safe($codigo) ?>">
+        <div class="room-card <?= $estado ?> <?= $isSuper?'super':'' ?>" id="hab-<?= $id ?>" data-id="<?= $id ?>" data-restante="<?= $rest ?>" data-tipo="<?= $tipo ?>">
           <div class="state-line"><?= safe($estadoTxt) ?></div>
           <div class="timer" id="timer-<?= $id ?>"><?= safe($timer) ?></div>
           <div class="room-num"><?= $id ?></div>
-          <?php if($codigo && ($estado==='reservada' || $estado==='ocupada')): ?>
-            <div class="room-code">#<?= safe($codigo) ?></div>
-          <?php endif; ?>
         </div>
         <div class="room-kind"><?= $tipo ?></div>
       </div>
@@ -2697,20 +2007,16 @@ $promedio_turno = ($cantidad_turnos > 0)
       <?php foreach(range(1,20) as $id):
         $s=$states[$id] ?? ['estado'=>'libre'];
         $estado=$s['estado']; $tipo=tipoDeHabitacion($id,$SUPER_VIP,$VIP_LIST);
-        $codigo=trim($s['codigo_reserva'] ?? '');
         $rest = sumRemainingForRoom($conn,$id);
         $estadoTxt = ($estado==='libre'?'Disponible':($estado==='limpieza'?'Limpieza':($estado==='reservada'?'Reservada':'Ocupada')));
         $timer = formatTimerLabel($rest, $estado);
         $isSuper = in_array($id,$SUPER_VIP);
       ?>
       <div class="room-wrap">
-        <div class="room-card <?= $estado ?> <?= $isSuper?'super':'' ?>" id="hab-<?= $id ?>" data-id="<?= $id ?>" data-restante="<?= $rest ?>" data-tipo="<?= $tipo ?>" data-codigo="<?= safe($codigo) ?>">
+        <div class="room-card <?= $estado ?> <?= $isSuper?'super':'' ?>" id="hab-<?= $id ?>" data-id="<?= $id ?>" data-restante="<?= $rest ?>" data-tipo="<?= $tipo ?>">
           <div class="state-line"><?= safe($estadoTxt) ?></div>
           <div class="timer" id="timer-<?= $id ?>"><?= safe($timer) ?></div>
           <div class="room-num"><?= $id ?></div>
-          <?php if($codigo && ($estado==='reservada' || $estado==='ocupada')): ?>
-            <div class="room-code">#<?= safe($codigo) ?></div>
-          <?php endif; ?>
         </div>
         <div class="room-kind"><?= $tipo ?></div>
       </div>
@@ -2763,9 +2069,7 @@ $promedio_turno = ($cantidad_turnos > 0)
   <div style="margin-bottom:6px; font-weight:bold; font-size:14px;">
     Inicio: <span id="turno-inicio">--:--</span> — Total: <span id="turno-total">0</span>
   </div>
-<div id="turno-digital-note" style="margin:-4px 0 8px 0; font-size:12px; color:#047857; display:none;">
-    Incluye ingresos digitales: $ 0
-  </div>
+
   <div id="turno-movimientos" style="max-height:200px; overflow-y:auto; border:1px solid #e5e7eb; border-radius:8px; background:#fff;">
     <table style="width:100%; border-collapse:collapse; font-size:12px;">
      <thead style="position:sticky; top:0; background:#f3f4f6;">
@@ -2830,8 +2134,7 @@ function renderMensajes(list){
       </div>
       <div class="mensaje-text">${escapeHTML(m.mensaje || '')}</div>
       <div class="mensaje-acciones">
-        <button type="button" data-id="${m.id}" data-action="ack">Marcar leído</button>
-        <button type="button" data-id="${m.id}" data-action="snooze">Recordar más tarde</button>
+        <button type="button" data-id="${m.id}">Marcar leído</button>
       </div>
     `;
     msgBody.appendChild(item);
@@ -2857,17 +2160,7 @@ async function marcarLeido(id){
     actualizarMensajes();
   }catch(err){ console.error(err); }
 }
-async function snoozearMensaje(id){
-  if(!id) return;
-  try{
-    await fetch('',{
-      method:'POST',
-      headers:{'Content-Type':'application/x-www-form-urlencoded'},
-      body:new URLSearchParams({accion:'snooze_mensaje',id})
-    });
-    actualizarMensajes();
-  }catch(err){ console.error(err); }
-}
+
 msgToggle.addEventListener('click', ()=>{
   const col = msgPanel.classList.contains('collapsed');
   setMensajesCollapsed(!col);
@@ -2879,13 +2172,8 @@ msgBody.addEventListener('click', (ev)=>{
   const btn = ev.target.closest('button[data-id]');
   if(!btn) return;
   const id = btn.dataset.id;
-  const action = btn.dataset.action || 'ack';
   btn.disabled = true;
-  if(action === 'snooze'){
-    snoozearMensaje(id).finally(()=>{ btn.disabled=false; });
-  } else {
-    marcarLeido(id).finally(()=>{ btn.disabled=false; });
-  }
+  marcarLeido(id).finally(()=>{ btn.disabled=false; });
 });
 
 msgForm.addEventListener('submit', async (ev)=>{
@@ -2966,26 +2254,14 @@ async function actualizarTurnoBox(){
     document.getElementById('turno-actual-label').textContent = 'Turno actual: '+ (j.turno_txt || '—' );
     document.getElementById('turno-inicio').textContent = j.inicio_arg||'--:--';
     document.getElementById('turno-total').textContent = (j.total||0).toLocaleString('es-AR');
-    const digitalNote = document.getElementById('turno-digital-note');
-    if(digitalNote){
-      const digitalVal = Math.round(j.digital_total||0);
-      if(digitalVal>0){
-        digitalNote.style.display = 'block';
-        digitalNote.textContent = `Incluye ingresos digitales: $ ${digitalVal.toLocaleString('es-AR')}`;
-      } else {
-        digitalNote.style.display = 'none';
-      }
-    }
 
       const body=document.getElementById('tb-mov-body');
     if(j.detalle && j.detalle.length){
      body.innerHTML=j.detalle.map(m=>{
-        const isDigital = m.tipo === 'digital';
-        const toggleable = (m.tipo === 'hab' || m.tipo === 'venta');
-        const showDelete = (m.tipo === 'hab' || m.tipo === 'venta');
-        const bg = isDigital ? '#eff6ff' : (toggleable ? (m.cobrado ? '#dcfce7' : '#fee2e2') : '#f3f4f6');
+        const toggleable = m.tipo !== 'ajuste';
+        const bg = toggleable ? (m.cobrado ? '#dcfce7' : '#fee2e2') : '#f3f4f6';
         const cursor = toggleable ? 'pointer' : 'default';
-        const cobradoTxt = toggleable ? (m.cobrado ? 'Cobrado' : 'Pendiente') : (isDigital ? 'Aprobado' : '');
+        const cobradoTxt = toggleable ? (m.cobrado ? 'Cobrado' : 'Pendiente') : '';
         return `
           <tr
             data-id="${m.id}"
@@ -2997,8 +2273,8 @@ async function actualizarTurnoBox(){
             <td style="padding:4px 6px;">${m.inicio}</td>
             <td style="padding:4px 6px; text-align:right; ${m.monto<0?'color:#b91c1c;':'color:#111827;'}">${m.monto}</td>
             <td style="padding:4px 6px; text-align:center;">
-              ${toggleable || isDigital ? `<span style="font-size:10px;color:#374151;display:block;">${cobradoTxt}</span>` : ''}
-              ${showDelete ? `
+              ${toggleable ? `<span style="font-size:10px;color:#374151;display:block;">${cobradoTxt}</span>` : ''}
+              ${m.tipo==='ajuste' ? '' : `
                 <button
                   class="btn-del-mov"
                   data-id="${m.id}"
@@ -3006,7 +2282,7 @@ async function actualizarTurnoBox(){
                   style="border:none;background:none;font-size:16px;cursor:pointer;">
                   🗑
                 </button>
-              ` : ''}
+              `}
             </td>
           </tr>
         `;
@@ -3165,7 +2441,7 @@ document.addEventListener('click', async (e)=>{
     return;
   }
 
-    if(estado==='reservada'){
+  if(estado==='reservada'){
     try {
       const res = await fetch(`obtener-codigo.php?id=${id}`);
       let j = {}; try { j = await res.json(); } catch(e) {}
@@ -3188,29 +2464,23 @@ const tipo = card.dataset.tipo || '';
       });
       if(!action) return;
 if(action==='mover'){
-        const mismas = Array.from(document.querySelectorAll('.room-card'))
-          .filter(r => (r.dataset.tipo || '') === tipo && parseInt(r.dataset.id,10)!==id)
+        const libresMismoTipo = Array.from(document.querySelectorAll('.room-card.libre'))
+          .filter(r => (r.dataset.tipo || '') === tipo)
           .sort((a,b)=>parseInt(a.dataset.id,10)-parseInt(b.dataset.id,10));
 
-        if(!mismas.length){
-          Swal.fire({icon:'info',title:'Sin habitaciones disponibles',text:'No hay habitaciones de la misma categoría.'});
+        if(!libresMismoTipo.length){
+          Swal.fire({icon:'info',title:'Sin habitaciones disponibles',text:'No hay habitaciones libres de la misma categoría.'});
           return;
         }
 
         const opciones = {};
-        mismas.forEach(r => {
-          const hid = r.dataset.id;
-          const estadoTxt = r.classList.contains('ocupada') ? 'Ocupada' :
-                            r.classList.contains('reservada') ? 'Reservada' :
-                            r.classList.contains('limpieza') ? 'Limpieza' : 'Libre';
-          opciones[hid] = `Hab. ${hid} — ${estadoTxt}`;
-        });
+        libresMismoTipo.forEach(r => { opciones[r.dataset.id] = `Hab. ${r.dataset.id}`; });
 
         const { value: nuevaHab } = await Swal.fire({
           title:`Mover reserva (Hab. ${id})`,
           input:'select',
           inputOptions: opciones,
-          inputPlaceholder:'Elegí habitación',
+          inputPlaceholder:'Elegí habitación libre',
           showCancelButton:true,
           confirmButtonText:'Mover'
         });
@@ -3219,8 +2489,7 @@ if(action==='mover'){
 
         const mov = await moverReserva(id, parseInt(nuevaHab,10));
         if(mov.ok){
-          const extraTxt = mov.destino==='ocupada' && mov.horas ? ` (+${mov.horas} h)` : '';
-          Swal.fire({icon:'success',title:'Reserva movida',text:`Asignada a la habitación ${nuevaHab}${extraTxt}.`});
+          Swal.fire({icon:'success',title:'Reserva movida',text:`Asignada a la habitación ${nuevaHab}.`});
         } else {
           Swal.fire({icon:'error',title:'No se pudo mover',text: mov.error || 'Intentalo de nuevo.'});
         }
@@ -3329,7 +2598,7 @@ async function moverReserva(desde, hasta){
       body:new URLSearchParams({accion:'mover_reserva',desde,hasta})
     });
     const txt = await res.text(); let j={}; try{ j=JSON.parse(txt);}catch(_){}
-    if(j && j.success===true){ await pollUpdates(true); return {ok:true, destino:j.destino, horas:j.horas}; }
+    if(j && j.success===true){ await pollUpdates(true); return {ok:true}; }
     await pollUpdates(true);
     return {ok:false, error:(j && j.error)||'No se pudo mover la reserva'};
   }catch(e){ await pollUpdates(true); return {ok:false, error:'No se pudo mover la reserva'}; }
@@ -3443,8 +2712,6 @@ async function pollUpdates(force=false){
          ============================== */
       cur.setAttribute('data-restante', newCard.getAttribute('data-restante') || '0');
       cur.setAttribute('data-tipo', newCard.getAttribute('data-tipo') || '');
-      const codigo = newCard.getAttribute('data-codigo') || '';
-      cur.setAttribute('data-codigo', codigo);
 
       /* ==============================
          🔥 FIX 3 — actualizar textos
@@ -3454,18 +2721,6 @@ async function pollUpdates(force=false){
 
       cur.querySelector('.timer').textContent =
           newCard.querySelector('.timer').textContent;
-          const codeTxt = (codigo && (cur.classList.contains('ocupada') || cur.classList.contains('reservada'))) ? ('#'+codigo) : '';
-      let codeEl = cur.querySelector('.room-code');
-      if(codeTxt){
-        if(!codeEl){
-          codeEl = document.createElement('div');
-          codeEl.className = 'room-code';
-          cur.appendChild(codeEl);
-        }
-        codeEl.textContent = codeTxt;
-      } else if(codeEl){
-        codeEl.remove();
-      }
 
       /* ==============================
          🔥 FIX 4 — ID numérico REAL
