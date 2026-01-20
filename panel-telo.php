@@ -620,7 +620,7 @@ function calcularAjustesDigitales($detalle,$movsDigital){
       if((int)($m['habitacion'] ?? 0) !== (int)$hab) continue;
       $startTs = toArgTs($m['hora_inicio_raw'] ?? '');
       if($startTs === null) continue;
-      $ventana = ((int)($m['es_extra'] ?? 0) === 1) ? 300 : 900; // 5 min extras, 15 min ocupación normal
+      $ventana = ((int)($m['es_extra'] ?? 0) === 1) ? 300 : 1800; // 5 min extras, 30 min ocupación normal
       $diff = abs($dTs - $startTs);
       if($diff > $ventana) continue;
 

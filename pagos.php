@@ -856,10 +856,7 @@ if($tokenRet){
         <?php if($feedback['ok']): ?>
           <div class="success">
             <h2 style="margin-top:0;">✅ Pago confirmado</h2>
-            <p>Código: <strong><?= htmlspecialchars($feedback['codigo'] ?? ($feedback['token'] ?? '')) ?></strong></p>
-            <?php if(!empty($feedback['habitacion'])): ?>
-              <p>Habitación asignada: <strong><?= (int)$feedback['habitacion'] ?></strong></p>
-            <?php endif; ?>
+            <p>Código de reserva (mostralo al ingresar): <strong><?= htmlspecialchars($feedback['codigo'] ?? ($feedback['token'] ?? '')) ?></strong></p>
             <?php if(!empty($feedback['turno'])): ?>
               <p>Turno: <strong><?= htmlspecialchars($feedback['turno']) ?></strong> — bloques: <?= (int)($feedback['bloques'] ?? 1) ?></p>
             <?php endif; ?>
