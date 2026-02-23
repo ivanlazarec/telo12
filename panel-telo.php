@@ -830,6 +830,13 @@ if($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion'])){
 
       $stmt = $conn->prepare("DELETE FROM historial_habitaciones WHERE id=?");
     } elseif ($tipo === 'venta') {
+        $selVenta = $conn->prepare("SELECT producto_id FROM ventas_turno WHERE id=? LIMIT 1");
+      $selVenta->bind_param('i', $id);
+      $selVenta->execute();
+      $ventaRow = $selVenta->get_result()->fetch_assoc();
+      $productoId = $ventaRow ? (int)$ventaRow['producto_id'] : null;
+      $selVenta->close();
+
       $stmt = $conn->prepare("DELETE FROM ventas_turno WHERE id=?");
     } else {
       echo json_encode(['ok'=>0, 'error'=>'Tipo inválido']);
@@ -868,6 +875,12 @@ if($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion'])){
         $upHab->execute();
         $upHab->close();
       }
+    }
+    if ($tipo === 'venta' && $productoId) {
+      $restoreInv = $conn->prepare("UPDATE inventario_productos SET cantidad = cantidad + 1, total_turno = total_turno + 1 WHERE id = ?");
+      $restoreInv->bind_param('i', $productoId);
+      $restoreInv->execute();
+      $restoreInv->close();
     }
     echo json_encode(['ok'=>1]);
     exit;

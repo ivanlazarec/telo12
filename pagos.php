@@ -453,7 +453,7 @@ function procesarRetornoPago($status,$token,$ctx=[]){
       return ['ok'=>true,'tipo'=>'servicio','habitacion'=>$habitacion,'monto'=>$row['monto']];
     }
   }
-if($row['estado'] !== 'aprobado' && $statusNorm!=='success'){
+    if($row['estado'] !== 'aprobado' && $statusNorm!=='success'){
     $approvedId = buscarPagoAprobadoPorToken($row['token'] ?? null, $row['pref_id'] ?? null)
       ?: buscarPagoAprobadoPorMovimiento($row['pref_id'] ?? null);
     if($approvedId){
@@ -461,13 +461,27 @@ if($row['estado'] !== 'aprobado' && $statusNorm!=='success'){
     }
   }
 
-  return [
+  $response = [
     'ok'=>($row['estado']==='aprobado'),
     'tipo'=>$row['tipo'],
     'habitacion'=>(int)($row['habitacion'] ?? 0),
     'monto'=>$row['monto'] ?? 0,
     'error'=> $statusNorm!=='success' ? 'El pago no fue aprobado' : null
   ];
+  if(($response['ok'] ?? false) && ($row['tipo'] ?? '') === 'reserva'){
+    $codigo = $payload['codigo'] ?? null;
+    if(!$codigo && !empty($row['habitacion'])){
+      $st = $conn->prepare("SELECT codigo_reserva FROM habitaciones WHERE id=? LIMIT 1");
+      $st->bind_param('i',$row['habitacion']);
+      $st->execute();
+      $codigo = $st->get_result()->fetch_assoc()['codigo_reserva'] ?? null;
+      $st->close();
+    }
+    $response['codigo'] = $codigo;
+    $response['turno'] = $payload['turno'] ?? null;
+    $response['bloques'] = $payload['bloques'] ?? null;
+  }
+  return $response;
 }
 function procesarWebhookMP(){
   if(($_GET['webhook'] ?? '')!=='mp'){ return; }
