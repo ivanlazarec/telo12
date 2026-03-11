@@ -3038,6 +3038,8 @@ $promedio_turno = ($cantidad_turnos > 0)
   let reconocimiento = null;
   let browserMics = [];
   let escuchaActiva = false;
+  let reintentosNetwork = 0;
+  let ultimoErrorReconocimiento = '';
 
   function escapeHtml(v){
     return String(v || '').replace(/[&<>"']/g, (m) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]));
@@ -3145,13 +3147,17 @@ $promedio_turno = ($cantidad_turnos > 0)
 
   function explicarErrorReconocimiento(errorCode){
     if(errorCode === 'network'){
-      return 'Error de reconocimiento de voz: network. El motor de SpeechRecognition depende de Internet en este navegador; no está relacionado al micrófono elegido.';
+      const estadoInternet = navigator.onLine ? 'Parece que tu conexión está activa, pero el servicio de reconocimiento no respondió.' : 'No hay conexión a Internet en este dispositivo.';
+      return 'Error de reconocimiento de voz: network. El motor de SpeechRecognition depende de Internet en este navegador y no está relacionado con el micrófono elegido. '+estadoInternet;
     }
     if(errorCode === 'not-allowed'){
       return 'Permiso de micrófono denegado por el navegador.';
     }
     if(errorCode === 'audio-capture'){
       return 'No se pudo capturar audio del micrófono seleccionado.';
+    }
+    if(errorCode === 'service-not-allowed'){
+      return 'El servicio de reconocimiento de voz no está permitido por este navegador/perfil.';
     }
     return 'Error de reconocimiento de voz: '+(errorCode || 'desconocido');
   }
@@ -3161,25 +3167,49 @@ $promedio_turno = ($cantidad_turnos > 0)
       browserStatus.textContent = 'Este navegador no soporta SpeechRecognition/webkitSpeechRecognition.';
       return;
     }
+    if(!window.isSecureContext && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1'){
+      browserStatus.textContent = 'Este navegador requiere HTTPS para reconocimiento de voz.';
+      return;
+    }
     await activarMicrofonoSeleccionado();
     reconocimiento = new SpeechRecognition();
     reconocimiento.lang = 'es-AR';
     reconocimiento.interimResults = false;
     reconocimiento.maxAlternatives = 1;
+     reconocimiento.continuous = true;
+    if('processLocally' in reconocimiento){
+      reconocimiento.processLocally = true;
+    }
     reconocimiento.onresult = async (event) => {
       const txt = event.results?.[0]?.[0]?.transcript || '';
       if(!txt){ return; }
+      reintentosNetwork = 0;
+      ultimoErrorReconocimiento = '';
       document.getElementById('voz-transcripcion').value = txt;
       await voiceCall({voice_action:'process_transcription', fuente_audio: sel.value, transcripcion: txt});
       await refresh();
     };
     reconocimiento.onerror = (event) => {
+         ultimoErrorReconocimiento = event.error || '';
       browserStatus.textContent = explicarErrorReconocimiento(event.error);
+      if(event.error === 'network' && escuchaActiva){
+        reintentosNetwork += 1;
+        const demora = Math.min(8000, 1000 * reintentosNetwork);
+        setTimeout(() => {
+          if(!escuchaActiva || !reconocimiento){ return; }
+          try {
+            reconocimiento.start();
+            browserStatus.textContent = 'Reintentando reconocimiento de voz ('+reintentosNetwork+')...';
+          } catch(err){}
+        }, demora);
+      }
     };
     reconocimiento.onend = () => {
-      if(escuchaActiva){
-        try { reconocimiento.start(); }
-        catch(err){ browserStatus.textContent = 'No se pudo reanudar reconocimiento: '+(err.message || err.name); }
+      if(escuchaActiva && ultimoErrorReconocimiento !== 'network'){
+        setTimeout(() => {
+          try { reconocimiento.start(); }
+          catch(err){ browserStatus.textContent = 'No se pudo reanudar reconocimiento: '+(err.message || err.name); }
+        }, 400);
       }
     };
     try {
