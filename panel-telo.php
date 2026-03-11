@@ -3040,6 +3040,8 @@ $promedio_turno = ($cantidad_turnos > 0)
   let escuchaActiva = false;
   let reintentosNetwork = 0;
   let ultimoErrorReconocimiento = '';
+  const idiomasReconocimiento = ['es-AR','es-419','es-ES','es-US','es'];
+  let idiomaIdx = 0;
 
   function escapeHtml(v){
     return String(v || '').replace(/[&<>"']/g, (m) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]));
@@ -3159,7 +3161,22 @@ $promedio_turno = ($cantidad_turnos > 0)
     if(errorCode === 'service-not-allowed'){
       return 'El servicio de reconocimiento de voz no está permitido por este navegador/perfil.';
     }
+    if(errorCode === 'language-not-supported'){
+      return 'El idioma configurado no es compatible con este navegador/motor. Se intentará un idioma alternativo automáticamente.';
+    }
     return 'Error de reconocimiento de voz: '+(errorCode || 'desconocido');
+  }
+  function crearReconocimiento(){
+    const idiomaActual = idiomasReconocimiento[idiomaIdx] || 'es';
+    reconocimiento = new SpeechRecognition();
+    reconocimiento.lang = idiomaActual;
+    reconocimiento.interimResults = false;
+    reconocimiento.maxAlternatives = 1;
+    reconocimiento.continuous = true;
+    if('processLocally' in reconocimiento){
+      reconocimiento.processLocally = false;
+    }
+    return idiomaActual;
   }
 
   async function iniciarReconocimiento(estadoInicial){
@@ -3172,14 +3189,7 @@ $promedio_turno = ($cantidad_turnos > 0)
       return;
     }
     await activarMicrofonoSeleccionado();
-    reconocimiento = new SpeechRecognition();
-    reconocimiento.lang = 'es-AR';
-    reconocimiento.interimResults = false;
-    reconocimiento.maxAlternatives = 1;
-     reconocimiento.continuous = true;
-    if('processLocally' in reconocimiento){
-      reconocimiento.processLocally = true;
-    }
+    const idiomaActual = crearReconocimiento();
     reconocimiento.onresult = async (event) => {
       const txt = event.results?.[0]?.[0]?.transcript || '';
       if(!txt){ return; }
@@ -3192,6 +3202,16 @@ $promedio_turno = ($cantidad_turnos > 0)
     reconocimiento.onerror = (event) => {
          ultimoErrorReconocimiento = event.error || '';
       browserStatus.textContent = explicarErrorReconocimiento(event.error);
+      if(event.error === 'language-not-supported'){
+        if(idiomaIdx < (idiomasReconocimiento.length - 1)){
+          idiomaIdx += 1;
+          browserStatus.textContent = 'Idioma '+idiomaActual+' no soportado. Probando '+idiomasReconocimiento[idiomaIdx]+'...';
+          try { reconocimiento.stop(); } catch(err){}
+        } else {
+          browserStatus.textContent = 'Ninguno de los idiomas configurados es compatible: '+idiomasReconocimiento.join(', ');
+        }
+      }
+
       if(event.error === 'network' && escuchaActiva){
         reintentosNetwork += 1;
         const demora = Math.min(8000, 1000 * reintentosNetwork);
@@ -3205,16 +3225,20 @@ $promedio_turno = ($cantidad_turnos > 0)
       }
     };
     reconocimiento.onend = () => {
-      if(escuchaActiva && ultimoErrorReconocimiento !== 'network'){
+      if(escuchaActiva){
         setTimeout(() => {
-          try { reconocimiento.start(); }
+          try {
+            const idioma = reconocimiento?.lang || idiomasReconocimiento[idiomaIdx] || 'es';
+            reconocimiento.start();
+            browserStatus.textContent = 'Escucha continua activa ('+idioma+').';
+          }
           catch(err){ browserStatus.textContent = 'No se pudo reanudar reconocimiento: '+(err.message || err.name); }
         }, 400);
       }
     };
     try {
       reconocimiento.start();
-      browserStatus.textContent = estadoInicial;
+      browserStatus.textContent = estadoInicial+' Idioma: '+idiomaActual;
     } catch(err){
       browserStatus.textContent = 'No se pudo iniciar reconocimiento: '+(err.message || err.name);
     }
