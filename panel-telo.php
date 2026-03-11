@@ -379,9 +379,35 @@ function vozFuenteCatalogo(){
     ['id'=>'stream-generic','label'=>'Stream de audio genérico']
   ];
 }
+function vozReemplazarNumerosEscritos($texto){
+  $map = [
+    'uno'=>'1','dos'=>'2','tres'=>'3','cuatro'=>'4','cinco'=>'5','seis'=>'6','siete'=>'7','ocho'=>'8','nueve'=>'9',
+    'diez'=>'10','once'=>'11','doce'=>'12','trece'=>'13','catorce'=>'14','quince'=>'15','dieciseis'=>'16','dieciséis'=>'16',
+    'diecisiete'=>'17','dieciocho'=>'18','diecinueve'=>'19','veinte'=>'20','veintiuno'=>'21','veintiun'=>'21','veintiún'=>'21',
+    'veintidos'=>'22','veintidós'=>'22','veintitres'=>'23','veintitrés'=>'23','veinticuatro'=>'24','veinticinco'=>'25',
+    'veintiseis'=>'26','veintiséis'=>'26','veintisiete'=>'27','veintiocho'=>'28','veintinueve'=>'29','treinta'=>'30',
+    'treinta y uno'=>'31','treinta y dos'=>'32','treinta y tres'=>'33','treinta y cuatro'=>'34','treinta y cinco'=>'35',
+    'treinta y seis'=>'36','treinta y siete'=>'37','treinta y ocho'=>'38','treinta y nueve'=>'39','cuarenta'=>'40'
+  ];
+  $salida = $texto;
+  uksort($map, function($a,$b){ return mb_strlen($b) <=> mb_strlen($a); });
+  foreach($map as $word=>$num){
+    $pat = '/\b'.preg_quote($word,'/').'\b/u';
+    $salida = preg_replace($pat, $num, $salida);
+  }
+  return $salida;
+}
+
+function vozDetectarTipoPedido($texto){
+  if(preg_match('/\b(super\s*vip|súper\s*vip)\b/u', $texto)){ return 'Super VIP'; }
+  if(preg_match('/\bvip\b/u', $texto)){ return 'VIP'; }
+  if(preg_match('/\b(comun|común|normal|basica|básica|estandar|estándar)\b/u', $texto)){ return 'Común'; }
+  return null;
+}
 
 function vozAnalizarTranscripcion($texto){
   $t = mb_strtolower(trim($texto));
+   $t = vozReemplazarNumerosEscritos($t);
   $nums = [];
   if(preg_match_all('/\b([0-9]{1,2})\b/u', $t, $m)){
     foreach($m[1] as $n){
@@ -390,9 +416,11 @@ function vozAnalizarTranscripcion($texto){
     }
   }
   $hab = count($nums) ? $nums[count($nums)-1] : null;
+  $tipoPedido = vozDetectarTipoPedido($t);
   $patronesVenta = [
     'pasen a la', 'te doy la', 'te dejo la', 'queda la',
-    'venta cerrada', 'confirmada', 'vendida', 'mejor la'
+    'venta cerrada', 'confirmada', 'vendida', 'mejor la',
+    'quiero comprar', 'quiero una', 'dame la', 'reservame', 'reservame la', 'resérvame'
   ];
   $patronesNoVenta = [
     'ocupada', 'espera', 'esperá', 'te fijo', 'consulta',
@@ -409,23 +437,24 @@ function vozAnalizarTranscripcion($texto){
   }
 
   $conf = $hab ? 0.58 : 0.25;
+  if($tipoPedido){ $conf += 0.10; }
   if($esVenta){ $conf += 0.30; }
   if($esNoVenta){ $conf -= 0.35; }
   $conf = max(0.05, min(0.99, $conf));
 
   if(!$hab){
-    return ['venta_detectada'=>false,'habitacion'=>null,'confianza'=>$conf,'motivo'=>'No se detectó habitación válida'];
+     return ['venta_detectada'=>false,'habitacion'=>null,'tipo_pedido'=>$tipoPedido,'confianza'=>$conf,'motivo'=>'No se detectó habitación válida'];
   }
   if($esNoVenta && !$esVenta){
-    return ['venta_detectada'=>false,'habitacion'=>$hab,'confianza'=>$conf,'motivo'=>'Conversación descartada por contexto'];
+    return ['venta_detectada'=>false,'habitacion'=>$hab,'tipo_pedido'=>$tipoPedido,'confianza'=>$conf,'motivo'=>'Conversación descartada por contexto'];
   }
   if($esVenta){
-    return ['venta_detectada'=>true,'habitacion'=>$hab,'confianza'=>$conf,'motivo'=>'Venta detectada por patrón de confirmación'];
+    return ['venta_detectada'=>true,'habitacion'=>$hab,'tipo_pedido'=>$tipoPedido,'confianza'=>$conf,'motivo'=>'Venta detectada por patrón de confirmación'];
   }
-  return ['venta_detectada'=>false,'habitacion'=>$hab,'confianza'=>$conf,'motivo'=>'Habitación mencionada sin cierre de venta'];
+  return ['venta_detectada'=>false,'habitacion'=>$hab,'tipo_pedido'=>$tipoPedido,'confianza'=>$conf,'motivo'=>'Habitación mencionada sin cierre de venta'];
 }
 
-function vozIntentarVentaHabitacion($conn,$habitacion,$SUPER_VIP,$VIP_LIST){
+function vozIntentarVentaHabitacion($conn,$habitacion,$SUPER_VIP,$VIP_LIST,$tipoPedido=null){
   $st = $conn->prepare("SELECT estado FROM habitaciones WHERE id=? LIMIT 1");
   $st->bind_param('i',$habitacion);
   $st->execute();
@@ -436,6 +465,9 @@ function vozIntentarVentaHabitacion($conn,$habitacion,$SUPER_VIP,$VIP_LIST){
   if(($row['estado'] ?? 'libre') !== 'libre'){ return ['ok'=>false,'motivo'=>'La habitación no está disponible']; }
 
   $tipo = tipoDeHabitacion($habitacion,$SUPER_VIP,$VIP_LIST);
+  if($tipoPedido && $tipoPedido !== $tipo){
+    return ['ok'=>false,'motivo'=>'Tipo solicitado '.$tipoPedido.' no coincide con la habitación '.$habitacion.' ('.$tipo.')'];
+  }
   $blockHours = turnoBlockHoursForToday();
   $turno = $blockHours===2 ? 'turno-2h' : 'turno-3h';
   $inicio = nowUTCStrFromArg();
@@ -549,7 +581,7 @@ if(isset($_GET['voice_api']) && $_GET['voice_api']==='1'){
       $obs = $analisis['motivo'];
       if($ventaDetectada){
         if($conf >= 0.78){
-          $venta = vozIntentarVentaHabitacion($conn,$habitacion,$SUPER_VIP,$VIP_LIST);
+          $venta = vozIntentarVentaHabitacion($conn,$habitacion,$SUPER_VIP,$VIP_LIST,$analisis['tipo_pedido'] ?? null);
           if($venta['ok']){
             $accionEjecutada = 1;
             $resultado = 'venta_ejecutada';
@@ -590,7 +622,7 @@ if(isset($_GET['voice_api']) && $_GET['voice_api']==='1'){
     if($action==='mark_sale'){
       $habitacion = intval($payload['habitacion'] ?? 0);
       if($habitacion < 1 || $habitacion > 40){ echo json_encode(['ok'=>0,'error'=>'Habitación inválida']); exit; }
-      $venta = vozIntentarVentaHabitacion($conn,$habitacion,$SUPER_VIP,$VIP_LIST);
+      $venta = vozIntentarVentaHabitacion($conn,$habitacion,$SUPER_VIP,$VIP_LIST,null);
       echo json_encode(['ok'=>$venta['ok'] ? 1 : 0,'motivo'=>$venta['motivo']]);
       exit;
     }
@@ -2964,6 +2996,7 @@ $promedio_turno = ($cantidad_turnos > 0)
       </label>
       <button id="voz-start" style="background:#0B5FFF;color:#fff;border:none;padding:10px 12px;border-radius:8px;cursor:pointer;">Iniciar escucha</button>
       <button id="voz-stop" style="background:#111827;color:#fff;border:none;padding:10px 12px;border-radius:8px;cursor:pointer;">Detener escucha</button>
+      <div id="voz-browser-status" style="grid-column:1/-1;color:#374151;font-size:12px;">Esperando permisos de micrófono...</div>
     </div>
 
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px;margin-top:14px;">
@@ -2977,8 +3010,11 @@ $promedio_turno = ($cantidad_turnos > 0)
     <div style="margin-top:14px;border:1px solid #e5e7eb;border-radius:8px;padding:10px;background:#fff;">
       <b>Procesamiento de transcripción (stub integrable)</b>
       <p style="margin:6px 0;color:#6b7280;">Este formulario permite inyectar resultados de ASR/IA real sin cambiar la arquitectura.</p>
-      <textarea id="voz-transcripcion" rows="3" placeholder="Ej: Pasen a la 7" style="width:100%;padding:10px;border:1px solid #d1d5db;border-radius:8px;"></textarea>
-      <button id="voz-procesar" style="margin-top:8px;background:#16a34a;color:#fff;border:none;padding:10px 12px;border-radius:8px;cursor:pointer;">Procesar transcripción</button>
+      <textarea id="voz-transcripcion" rows="3" placeholder="Ej: Quiero comprar una vip, habitación 7" style="width:100%;padding:10px;border:1px solid #d1d5db;border-radius:8px;"></textarea>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;">
+        <button id="voz-procesar" style="background:#16a34a;color:#fff;border:none;padding:10px 12px;border-radius:8px;cursor:pointer;">Procesar transcripción</button>
+        <button id="voz-capturar" style="background:#7c3aed;color:#fff;border:none;padding:10px 12px;border-radius:8px;cursor:pointer;">Capturar desde micrófono</button>
+      </div>
     </div>
 
     <h3 style="margin-bottom:8px;">Eventos recientes</h3>
@@ -2995,7 +3031,39 @@ $promedio_turno = ($cantidad_turnos > 0)
 <script>
 (function(){
   const sel = document.getElementById('voz-fuente');
+  const browserStatus = document.getElementById('voz-browser-status');
+  const btnCapturar = document.getElementById('voz-capturar');
   const stateFuente = document.getElementById('voz-state-fuente');
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  let reconocimiento = null;
+  let browserMics = [];
+
+  function escapeHtml(v){
+    return String(v || '').replace(/[&<>"']/g, (m) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]));
+  }
+
+  async function cargarMicrofonosNavegador(){
+    if(!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices){
+      browserStatus.textContent = 'El navegador no permite enumerar micrófonos en este dispositivo.';
+      return;
+    }
+    try {
+      await navigator.mediaDevices.getUserMedia({audio:true});
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const mics = devices.filter(d => d.kind === 'audioinput');
+      if(mics.length){
+        browserMics = mics.map((d, idx) => ({
+          id: d.deviceId || ('mic-'+idx),
+          label: d.label || ('Micrófono '+(idx+1))
+        }));
+        browserStatus.textContent = 'Micrófonos detectados: '+mics.length;
+      } else {
+        browserStatus.textContent = 'No se detectaron micrófonos de entrada.';
+      }
+    } catch(err){
+      browserStatus.textContent = 'Permiso de micrófono denegado o no disponible: '+(err.message || err.name);
+    }
+  }
   const stateEstado = document.getElementById('voz-state-estado');
   const stateEvento = document.getElementById('voz-state-evento');
   const stateHab = document.getElementById('voz-state-hab');
@@ -3019,7 +3087,7 @@ $promedio_turno = ($cantidad_turnos > 0)
     tbody.innerHTML = items.map(ev => `
       <tr>
         <td style="padding:8px;border-bottom:1px solid #f3f4f6;">${ev.fecha_hora || ''}</td>
-        <td style="padding:8px;border-bottom:1px solid #f3f4f6;">${(ev.transcripcion||'').replace(/</g,'&lt;')}</td>
+        <td style="padding:8px;border-bottom:1px solid #f3f4f6;">${escapeHtml(ev.transcripcion || '')}</td>
         <td style="padding:8px;border-bottom:1px solid #f3f4f6;">${ev.habitacion_detectada || '-'}</td>
         <td style="padding:8px;border-bottom:1px solid #f3f4f6;">${ev.resultado || '-'}</td>
         <td style="padding:8px;border-bottom:1px solid #f3f4f6;">${ev.confianza ? ev.confianza+'%' : '-'}</td>
@@ -3032,6 +3100,7 @@ $promedio_turno = ($cantidad_turnos > 0)
     const data = await res.json();
     if(!data.ok){ return; }
 
+    const previousValue = sel.value;
     sel.innerHTML = '';
     (data.fuentes || []).forEach(f => {
       const op = document.createElement('option');
@@ -3040,7 +3109,19 @@ $promedio_turno = ($cantidad_turnos > 0)
       sel.appendChild(op);
     });
 
-    if(data.estado && data.estado.fuente_audio){ sel.value = data.estado.fuente_audio; }
+    browserMics.forEach((m) => {
+      const op = document.createElement('option');
+      op.value = m.id;
+      op.textContent = m.label;
+      op.dataset.from = 'browser';
+      sel.appendChild(op);
+    });
+
+    if(previousValue && Array.from(sel.options).some(o => o.value === previousValue)){
+      sel.value = previousValue;
+    } else if(data.estado && data.estado.fuente_audio && Array.from(sel.options).some(o => o.value === data.estado.fuente_audio)){
+      sel.value = data.estado.fuente_audio;
+    }
     stateFuente.textContent = data.estado?.fuente_audio || '-';
     stateEstado.textContent = data.estado?.estado || 'detenido';
     stateEvento.textContent = data.estado?.ultimo_evento || 'Sin eventos';
@@ -3051,12 +3132,33 @@ $promedio_turno = ($cantidad_turnos > 0)
   }
 
   document.getElementById('voz-start').addEventListener('click', async ()=>{
-    await voiceCall({voice_action:'start_listening', fuente_audio: sel.value});
+    if(SpeechRecognition){
+      reconocimiento = new SpeechRecognition();
+      reconocimiento.lang = 'es-AR';
+      reconocimiento.interimResults = false;
+      reconocimiento.maxAlternatives = 1;
+      reconocimiento.onresult = async (event) => {
+        const txt = event.results?.[0]?.[0]?.transcript || '';
+        if(!txt){ return; }
+        document.getElementById('voz-transcripcion').value = txt;
+        await voiceCall({voice_action:'process_transcription', fuente_audio: sel.value, transcripcion: txt});
+        await refresh();
+      };
+      reconocimiento.onerror = (event) => {
+        browserStatus.textContent = 'Error de reconocimiento de voz: '+(event.error || 'desconocido');
+      };
+      try { reconocimiento.start(); browserStatus.textContent = 'Escuchando desde micrófono del navegador...'; }
+      catch(err){ browserStatus.textContent = 'No se pudo iniciar reconocimiento: '+(err.message || err.name); }
+    } else {
+      browserStatus.textContent = 'Este navegador no soporta SpeechRecognition/webkitSpeechRecognition.';
+    }
     await refresh();
   });
 
   document.getElementById('voz-stop').addEventListener('click', async ()=>{
     await voiceCall({voice_action:'stop_listening'});
+    if(reconocimiento){ try { reconocimiento.stop(); } catch(e){} }
+    browserStatus.textContent = 'Escucha detenida';
     await refresh();
   });
 
@@ -3067,7 +3169,31 @@ $promedio_turno = ($cantidad_turnos > 0)
     document.getElementById('voz-transcripcion').value = '';
     await refresh();
   });
+btnCapturar.addEventListener('click', async ()=>{
+    if(!SpeechRecognition){
+      browserStatus.textContent = 'SpeechRecognition no está disponible en este navegador.';
+      return;
+    }
+    reconocimiento = new SpeechRecognition();
+    reconocimiento.lang = 'es-AR';
+    reconocimiento.interimResults = false;
+    reconocimiento.maxAlternatives = 1;
+    reconocimiento.onresult = async (event) => {
+      const txt = event.results?.[0]?.[0]?.transcript || '';
+      document.getElementById('voz-transcripcion').value = txt;
+      if(txt){
+        await voiceCall({voice_action:'process_transcription', fuente_audio: sel.value, transcripcion: txt});
+        await refresh();
+      }
+    };
+    reconocimiento.onerror = (event) => {
+      browserStatus.textContent = 'Error de captura: '+(event.error || 'desconocido');
+    };
+    try { reconocimiento.start(); browserStatus.textContent = 'Hablá ahora...'; }
+    catch(err){ browserStatus.textContent = 'No se pudo capturar audio: '+(err.message || err.name); }
+  });
 
+  cargarMicrofonosNavegador();
   refresh();
   setInterval(refresh, 5000);
 })();
