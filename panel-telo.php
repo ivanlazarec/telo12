@@ -1621,6 +1621,27 @@ header{position:sticky;top:0;z-index:5;background:#fff;border-bottom:1px solid v
 html, body { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; text-rendering: optimizeLegibility; }
 * { font-smooth: always; }
 .swal2-container { z-index: 99999 !important; }
+.swal-accion-extra,
+.swal-accion-cerrar{
+  font-weight:800 !important;
+  border-radius:12px !important;
+  box-shadow:none !important;
+  min-width:220px;
+}
+.swal-accion-extra{
+  background:#0B5FFF !important;
+  color:#fff !important;
+}
+.swal-accion-extra:hover{
+  background:#084fdb !important;
+}
+.swal-accion-cerrar{
+  background:#DC2626 !important;
+  color:#fff !important;
+}
+.swal-accion-cerrar:hover{
+  background:#b91c1c !important;
+}
 /* ========================
    CAMPANA flotante (solo escritorio)
    ======================== */
@@ -3252,51 +3273,64 @@ if(action==='mover'){
   }
   
 if(estado==='vencida'){
-    const { value: action } = await Swal.fire({
+    const result = await Swal.fire({
       title:`Hab. ${id} — Tiempo vencido`,
-      input:'radio',
-      inputOptions:{
-        limpieza:'Mandar a Limpieza',
-        reactivar:'Reactivar con turno extra'
-      },
-      inputValidator: v => !v && 'Elegí una opción',
+      html:'Elegí una acción:<br><small style="color:#6b7280">Los botones están diferenciados para evitar confusiones.</small>',
+      showDenyButton:true,
       showCancelButton:true,
-      confirmButtonText:'Aceptar'
+      confirmButtonText:`🔵 Reactivar (+${turnoBlockHoursJS()} h)`,
+      denyButtonText:'🔴 Cerrar habitación (Limpieza)',
+      cancelButtonText:'Cancelar',
+      customClass:{
+        confirmButton:'swal-accion-extra',
+        denyButton:'swal-accion-cerrar'
+      },
+      reverseButtons:true,
+      focusConfirm:false,
+      focusDeny:true,
     });
 
-    if(action==='limpieza'){
-      await setEstado([id],'limpieza');
-      Swal.fire({icon:'success',title:'En limpieza'});
-    } else if(action==='reactivar'){
+    if(result.isConfirmed){
       const ok = await reactivarExtra(id);
       if(ok){
         Swal.fire({icon:'success',title:'Reactivada',text:`+${turnoBlockHoursJS()} h agregadas`});
       } else {
         Swal.fire({icon:'error',title:'No se pudo reactivar'});
       }
+    } else if(result.isDenied){
+      await setEstado([id],'limpieza');
+      Swal.fire({icon:'success',title:'Habitación cerrada',text:'Quedó en Limpieza.'});
     }
     return;
   }
 
   if(estado==='ocupada'){
-    const { value: action } = await Swal.fire({
+    const result = await Swal.fire({
       title: `Hab. ${id} — Ocupada`,
-      input: 'radio',
-      inputOptions: { 'agregar':'Agregar otro turno', 'liberar':'Liberar (pasa a Limpieza)' },
-      inputValidator: v => !v && 'Elegí una opción',
-      confirmButtonText:'Aceptar',
+      html:'Elegí una acción:<br><small style="color:#6b7280">Los botones están diferenciados para evitar confusiones.</small>',
+      showCancelButton:true,
+      showDenyButton:true,
+      confirmButtonText:`🔵 Agregar turno extra (+${turnoBlockHoursJS()} h)`,
+      denyButtonText:'🔴 Cerrar habitación (Limpieza)',
       cancelButtonText:'Cancelar',
-      showCancelButton:true
+      customClass:{
+        confirmButton:'swal-accion-extra',
+        denyButton:'swal-accion-cerrar'
+      },
+      reverseButtons:true,
+      focusConfirm:false,
+      focusDeny:true,
     });
-    if(!action) return;
-
-    if(action==='agregar'){
+    if(result.isConfirmed){
       const ok = await ocuparTurno([id], true);
-      if(ok){ Swal.fire({icon:'success',title:'Turno agregado',text:`+${turnoBlockHoursJS()} h`}); }
-      else { Swal.fire({icon:'warning',title:'No se pudo agregar',text:'Verificá si tiene Noche activa.'}); }
-    }else{
+       if(ok){
+        Swal.fire({icon:'success',title:'Turno agregado',text:`+${turnoBlockHoursJS()} h`});
+      } else {
+        Swal.fire({icon:'warning',title:'No se pudo agregar',text:'Verificá si tiene Noche activa.'});
+      }
+    } else if(result.isDenied){
       await setEstado([id],'limpieza');
-      Swal.fire({icon:'success',title:'Liberado',text:'Quedó en Limpieza.'});
+      Swal.fire({icon:'success',title:'Habitación cerrada',text:'Quedó en Limpieza.'});
     }
     return;
   }

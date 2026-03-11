@@ -427,30 +427,43 @@ function procesarRetornoPago($status,$token,$ctx=[]){
   }
 
   if($row['estado'] !== 'aprobado' && $statusNorm==='success'){
-    $conn->query("UPDATE pagos_online SET estado='aprobado', updated_at='".nowUTCStrFromArg()."' WHERE id=".(int)$row['id']);
+    $aprobadoAt = nowUTCStrFromArg();
+    $up = $conn->prepare("UPDATE pagos_online SET estado='aprobado', updated_at=? WHERE id=? AND estado!='aprobado'");
+    $up->bind_param('si',$aprobadoAt,$row['id']);
+    $up->execute();
+    $updatedRows = $up->affected_rows;
+    $up->close();
 
-    if($row['tipo']==='reserva'){
-      $res = finalizarReserva($conn,$payload,$row,$row['created_at'] ?? null);
-      return array_merge(['tipo'=>'reserva'], $res);
-    }
-    if($row['tipo']==='envio'){
-      $habitacion = (int)($payload['habitacion'] ?? 0);
-      $tipoHab = $habitacion ? tipoDeHabitacion($habitacion,$GLOBALS['SUPER_VIP'],$GLOBALS['VIP_LIST']) : '—';
-      registrarIngresoDigital($conn,'envio',$habitacion,$tipoHab,(float)$row['monto'],"Envío de dinero online",$payload['codigo'] ?? null,1,$row['token'],$row['created_at'] ?? null);
-      registrarMensajeInterno($conn,'Pago online',"Hab. $habitacion envió $".$row['monto']." a caja digital.");
-      return ['ok'=>true,'tipo'=>'envio','habitacion'=>$habitacion,'monto'=>$row['monto']];
-    }
-    if($row['tipo']==='extra'){
-      $habitacion = (int)($payload['habitacion'] ?? 0);
-      $bloques = max(1,(int)($payload['bloques'] ?? 1));
-      $turnoTag = $payload['turno'] ?? 'turno-3h';
-      $finTs = extenderTurnoDesdePago($conn,$habitacion,$bloques,$turnoTag,(float)$row['monto'],$row['token'],$row['created_at'] ?? null);
-      return ['ok'=>true,'tipo'=>'extra','habitacion'=>$habitacion,'fin_ts'=>$finTs,'bloques'=>$bloques,'turno'=>$turnoTag];
-    }
-    if($row['tipo']==='servicio'){
-      $habitacion = (int)($payload['habitacion'] ?? 0);
-      procesarServicioDigital($conn,$habitacion,$payload['items'] ?? [],(float)$row['monto'],$row['token'],$row['created_at'] ?? null);
-      return ['ok'=>true,'tipo'=>'servicio','habitacion'=>$habitacion,'monto'=>$row['monto']];
+    // Si otra ejecución ya aprobó este token, evitamos reprocesar movimientos digitales.
+    if($updatedRows !== 1){
+      // Otro proceso ya lo había marcado: considerarlo exitoso sin duplicar efectos.
+      $row['estado'] = 'aprobado';
+      $statusNorm = 'success';
+    } else {
+
+     if($row['tipo']==='reserva'){
+        $res = finalizarReserva($conn,$payload,$row,$row['created_at'] ?? null);
+        return array_merge(['tipo'=>'reserva'], $res);
+      }
+      if($row['tipo']==='envio'){
+        $habitacion = (int)($payload['habitacion'] ?? 0);
+        $tipoHab = $habitacion ? tipoDeHabitacion($habitacion,$GLOBALS['SUPER_VIP'],$GLOBALS['VIP_LIST']) : '—';
+        registrarIngresoDigital($conn,'envio',$habitacion,$tipoHab,(float)$row['monto'],"Envío de dinero online",$payload['codigo'] ?? null,1,$row['token'],$row['created_at'] ?? null);
+        registrarMensajeInterno($conn,'Pago online',"Hab. $habitacion envió $".$row['monto']." a caja digital.");
+        return ['ok'=>true,'tipo'=>'envio','habitacion'=>$habitacion,'monto'=>$row['monto']];
+      }
+      if($row['tipo']==='extra'){
+        $habitacion = (int)($payload['habitacion'] ?? 0);
+        $bloques = max(1,(int)($payload['bloques'] ?? 1));
+        $turnoTag = $payload['turno'] ?? 'turno-3h';
+        $finTs = extenderTurnoDesdePago($conn,$habitacion,$bloques,$turnoTag,(float)$row['monto'],$row['token'],$row['created_at'] ?? null);
+        return ['ok'=>true,'tipo'=>'extra','habitacion'=>$habitacion,'fin_ts'=>$finTs,'bloques'=>$bloques,'turno'=>$turnoTag];
+      }
+      if($row['tipo']==='servicio'){
+        $habitacion = (int)($payload['habitacion'] ?? 0);
+        procesarServicioDigital($conn,$habitacion,$payload['items'] ?? [],(float)$row['monto'],$row['token'],$row['created_at'] ?? null);
+        return ['ok'=>true,'tipo'=>'servicio','habitacion'=>$habitacion,'monto'=>$row['monto']];
+      }
     }
   }
     if($row['estado'] !== 'aprobado' && $statusNorm!=='success'){
