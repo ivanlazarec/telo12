@@ -3037,6 +3037,7 @@ $promedio_turno = ($cantidad_turnos > 0)
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   let reconocimiento = null;
   let browserMics = [];
+  let escuchaActiva = false;
 
   function escapeHtml(v){
     return String(v || '').replace(/[&<>"']/g, (m) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]));
@@ -3131,31 +3132,73 @@ $promedio_turno = ($cantidad_turnos > 0)
     renderEvents(data.eventos || []);
   }
 
-  document.getElementById('voz-start').addEventListener('click', async ()=>{
-    if(SpeechRecognition){
-      reconocimiento = new SpeechRecognition();
-      reconocimiento.lang = 'es-AR';
-      reconocimiento.interimResults = false;
-      reconocimiento.maxAlternatives = 1;
-      reconocimiento.onresult = async (event) => {
-        const txt = event.results?.[0]?.[0]?.transcript || '';
-        if(!txt){ return; }
-        document.getElementById('voz-transcripcion').value = txt;
-        await voiceCall({voice_action:'process_transcription', fuente_audio: sel.value, transcripcion: txt});
-        await refresh();
-      };
-      reconocimiento.onerror = (event) => {
-        browserStatus.textContent = 'Error de reconocimiento de voz: '+(event.error || 'desconocido');
-      };
-      try { reconocimiento.start(); browserStatus.textContent = 'Escuchando desde micrófono del navegador...'; }
-      catch(err){ browserStatus.textContent = 'No se pudo iniciar reconocimiento: '+(err.message || err.name); }
-    } else {
-      browserStatus.textContent = 'Este navegador no soporta SpeechRecognition/webkitSpeechRecognition.';
+  async function activarMicrofonoSeleccionado(){
+    const selected = sel.options[sel.selectedIndex];
+    if(!selected || selected.dataset.from !== 'browser' || !selected.value){
+      return;
     }
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { deviceId: { exact: selected.value } }
+    });
+    stream.getTracks().forEach(t => t.stop());
+  }
+
+  function explicarErrorReconocimiento(errorCode){
+    if(errorCode === 'network'){
+      return 'Error de reconocimiento de voz: network. El motor de SpeechRecognition depende de Internet en este navegador; no está relacionado al micrófono elegido.';
+    }
+    if(errorCode === 'not-allowed'){
+      return 'Permiso de micrófono denegado por el navegador.';
+    }
+    if(errorCode === 'audio-capture'){
+      return 'No se pudo capturar audio del micrófono seleccionado.';
+    }
+    return 'Error de reconocimiento de voz: '+(errorCode || 'desconocido');
+  }
+
+  async function iniciarReconocimiento(estadoInicial){
+    if(!SpeechRecognition){
+      browserStatus.textContent = 'Este navegador no soporta SpeechRecognition/webkitSpeechRecognition.';
+      return;
+    }
+    await activarMicrofonoSeleccionado();
+    reconocimiento = new SpeechRecognition();
+    reconocimiento.lang = 'es-AR';
+    reconocimiento.interimResults = false;
+    reconocimiento.maxAlternatives = 1;
+    reconocimiento.onresult = async (event) => {
+      const txt = event.results?.[0]?.[0]?.transcript || '';
+      if(!txt){ return; }
+      document.getElementById('voz-transcripcion').value = txt;
+      await voiceCall({voice_action:'process_transcription', fuente_audio: sel.value, transcripcion: txt});
+      await refresh();
+    };
+    reconocimiento.onerror = (event) => {
+      browserStatus.textContent = explicarErrorReconocimiento(event.error);
+    };
+    reconocimiento.onend = () => {
+      if(escuchaActiva){
+        try { reconocimiento.start(); }
+        catch(err){ browserStatus.textContent = 'No se pudo reanudar reconocimiento: '+(err.message || err.name); }
+      }
+    };
+    try {
+      reconocimiento.start();
+      browserStatus.textContent = estadoInicial;
+    } catch(err){
+      browserStatus.textContent = 'No se pudo iniciar reconocimiento: '+(err.message || err.name);
+    }
+  }
+
+  document.getElementById('voz-start').addEventListener('click', async ()=>{
+    escuchaActiva = true;
+    await voiceCall({voice_action:'start_listening', fuente_audio: sel.value});
+    await iniciarReconocimiento('Escuchando desde micrófono del navegador...');
     await refresh();
   });
 
   document.getElementById('voz-stop').addEventListener('click', async ()=>{
+      escuchaActiva = false;
     await voiceCall({voice_action:'stop_listening'});
     if(reconocimiento){ try { reconocimiento.stop(); } catch(e){} }
     browserStatus.textContent = 'Escucha detenida';
@@ -3170,27 +3213,8 @@ $promedio_turno = ($cantidad_turnos > 0)
     await refresh();
   });
 btnCapturar.addEventListener('click', async ()=>{
-    if(!SpeechRecognition){
-      browserStatus.textContent = 'SpeechRecognition no está disponible en este navegador.';
-      return;
-    }
-    reconocimiento = new SpeechRecognition();
-    reconocimiento.lang = 'es-AR';
-    reconocimiento.interimResults = false;
-    reconocimiento.maxAlternatives = 1;
-    reconocimiento.onresult = async (event) => {
-      const txt = event.results?.[0]?.[0]?.transcript || '';
-      document.getElementById('voz-transcripcion').value = txt;
-      if(txt){
-        await voiceCall({voice_action:'process_transcription', fuente_audio: sel.value, transcripcion: txt});
-        await refresh();
-      }
-    };
-    reconocimiento.onerror = (event) => {
-      browserStatus.textContent = 'Error de captura: '+(event.error || 'desconocido');
-    };
-    try { reconocimiento.start(); browserStatus.textContent = 'Hablá ahora...'; }
-    catch(err){ browserStatus.textContent = 'No se pudo capturar audio: '+(err.message || err.name); }
+    escuchaActiva = false;
+    await iniciarReconocimiento('Hablá ahora...');
   });
 
   cargarMicrofonosNavegador();
