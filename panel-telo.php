@@ -106,6 +106,38 @@ $conn->query("CREATE TABLE IF NOT EXISTS habitaciones (
   hora_inicio DATETIME NULL,
   codigo_reserva VARCHAR(10) NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
+$conn->query("CREATE TABLE IF NOT EXISTS voz_eventos (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  fecha_hora DATETIME NOT NULL,
+  fuente_audio VARCHAR(120) NOT NULL,
+  transcripcion TEXT NOT NULL,
+  venta_detectada TINYINT(1) NOT NULL DEFAULT 0,
+  habitacion_detectada INT NULL,
+  confianza DECIMAL(5,2) NULL,
+  accion_ejecutada TINYINT(1) NOT NULL DEFAULT 0,
+  resultado VARCHAR(40) NOT NULL DEFAULT 'sin_venta',
+  observaciones VARCHAR(255) NULL,
+  accion_tipo VARCHAR(20) NOT NULL DEFAULT 'automatica',
+  INDEX(fecha_hora),
+  INDEX(habitacion_detectada)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
+
+$conn->query("CREATE TABLE IF NOT EXISTS voz_estado (
+  id TINYINT PRIMARY KEY,
+  fuente_audio VARCHAR(120) NOT NULL,
+  estado VARCHAR(20) NOT NULL DEFAULT 'detenido',
+  ultimo_evento VARCHAR(80) NULL,
+  ultima_habitacion INT NULL,
+  ultima_confianza DECIMAL(5,2) NULL,
+  updated_at DATETIME NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
+
+$__vozExists = $conn->query("SELECT COUNT(*) c FROM voz_estado WHERE id=1")->fetch_assoc()['c'] ?? 0;
+if (!$__vozExists) {
+  $nowUTC = nowUTCStrFromArg();
+  $conn->query("INSERT INTO voz_estado (id, fuente_audio, estado, ultimo_evento, updated_at) VALUES (1,'mic-default','detenido','Sin eventos', '$nowUTC')");
+}
+
 
 for($i=1;$i<=40;$i++){
   $conn->query("INSERT IGNORE INTO habitaciones (id,estado) VALUES ($i,'libre')");
@@ -339,6 +371,233 @@ function precioVigenteInt($conn,$tipo,$turno){
   $st->bind_param('ss',$tipo,$turno); $st->execute(); $res=$st->get_result(); if($row=$res->fetch_assoc()) $p=floatval($row['precio']);
   $st->close();
   return (int)round($p,0);
+}
+function vozFuenteCatalogo(){
+  return [
+    ['id'=>'mic-default','label'=>'Micrófono del dispositivo'],
+    ['id'=>'system-input','label'=>'Entrada de audio del sistema'],
+    ['id'=>'stream-generic','label'=>'Stream de audio genérico']
+  ];
+}
+
+function vozAnalizarTranscripcion($texto){
+  $t = mb_strtolower(trim($texto));
+  $nums = [];
+  if(preg_match_all('/\b([0-9]{1,2})\b/u', $t, $m)){
+    foreach($m[1] as $n){
+      $v = intval($n);
+      if($v >= 1 && $v <= 40){ $nums[] = $v; }
+    }
+  }
+  $hab = count($nums) ? $nums[count($nums)-1] : null;
+  $patronesVenta = [
+    'pasen a la', 'te doy la', 'te dejo la', 'queda la',
+    'venta cerrada', 'confirmada', 'vendida', 'mejor la'
+  ];
+  $patronesNoVenta = [
+    'ocupada', 'espera', 'esperá', 'te fijo', 'consulta',
+    'descartada', 'no vender', 'no está', 'no esta'
+  ];
+
+  $esVenta = false;
+  foreach($patronesVenta as $p){
+    if(strpos($t, $p) !== false){ $esVenta = true; break; }
+  }
+  $esNoVenta = false;
+  foreach($patronesNoVenta as $p){
+    if(strpos($t, $p) !== false){ $esNoVenta = true; break; }
+  }
+
+  $conf = $hab ? 0.58 : 0.25;
+  if($esVenta){ $conf += 0.30; }
+  if($esNoVenta){ $conf -= 0.35; }
+  $conf = max(0.05, min(0.99, $conf));
+
+  if(!$hab){
+    return ['venta_detectada'=>false,'habitacion'=>null,'confianza'=>$conf,'motivo'=>'No se detectó habitación válida'];
+  }
+  if($esNoVenta && !$esVenta){
+    return ['venta_detectada'=>false,'habitacion'=>$hab,'confianza'=>$conf,'motivo'=>'Conversación descartada por contexto'];
+  }
+  if($esVenta){
+    return ['venta_detectada'=>true,'habitacion'=>$hab,'confianza'=>$conf,'motivo'=>'Venta detectada por patrón de confirmación'];
+  }
+  return ['venta_detectada'=>false,'habitacion'=>$hab,'confianza'=>$conf,'motivo'=>'Habitación mencionada sin cierre de venta'];
+}
+
+function vozIntentarVentaHabitacion($conn,$habitacion,$SUPER_VIP,$VIP_LIST){
+  $st = $conn->prepare("SELECT estado FROM habitaciones WHERE id=? LIMIT 1");
+  $st->bind_param('i',$habitacion);
+  $st->execute();
+  $row = $st->get_result()->fetch_assoc();
+  $st->close();
+
+  if(!$row){ return ['ok'=>false,'motivo'=>'Habitación inexistente']; }
+  if(($row['estado'] ?? 'libre') !== 'libre'){ return ['ok'=>false,'motivo'=>'La habitación no está disponible']; }
+
+  $tipo = tipoDeHabitacion($habitacion,$SUPER_VIP,$VIP_LIST);
+  $blockHours = turnoBlockHoursForToday();
+  $turno = $blockHours===2 ? 'turno-2h' : 'turno-3h';
+  $inicio = nowUTCStrFromArg();
+  $fecha = argDateToday();
+  $precio = precioVigenteInt($conn,$tipo,$turno);
+  $estado='ocupada';
+  $bloques=1;
+
+  $ins=$conn->prepare("INSERT INTO historial_habitaciones (habitacion,tipo,estado,turno,hora_inicio,fecha_registro,precio_aplicado,es_extra,bloques)
+                       VALUES (?,?,?,?,?,?,?,0,?)");
+  $ins->bind_param('isssssii',$habitacion,$tipo,$estado,$turno,$inicio,$fecha,$precio,$bloques);
+  $okIns = $ins->execute();
+  $ins->close();
+  if(!$okIns){ return ['ok'=>false,'motivo'=>'No se pudo registrar historial']; }
+
+  $up = $conn->prepare("UPDATE habitaciones SET estado='ocupada', tipo_turno=?, hora_inicio=?, codigo_reserva=NULL WHERE id=?");
+  $up->bind_param('ssi',$turno,$inicio,$habitacion);
+  $okUp = $up->execute();
+  $up->close();
+
+  if(!$okUp){ return ['ok'=>false,'motivo'=>'No se pudo actualizar habitación']; }
+  return ['ok'=>true,'motivo'=>'Habitación marcada como vendida'];
+}
+
+function vozRegistrarEvento($conn,$data){
+  $st = $conn->prepare("INSERT INTO voz_eventos (fecha_hora, fuente_audio, transcripcion, venta_detectada, habitacion_detectada, confianza, accion_ejecutada, resultado, observaciones, accion_tipo)
+                        VALUES (?,?,?,?,?,?,?,?,?,?)");
+  $st->bind_param(
+    'sssiiiisss',
+    $data['fecha_hora'],
+    $data['fuente_audio'],
+    $data['transcripcion'],
+    $data['venta_detectada'],
+    $data['habitacion_detectada'],
+    $data['confianza_pct'],
+    $data['accion_ejecutada'],
+    $data['resultado'],
+    $data['observaciones'],
+    $data['accion_tipo']
+  );
+  $st->execute();
+  $id = $st->insert_id;
+  $st->close();
+  return $id;
+}
+
+if(isset($_GET['voice_api']) && $_GET['voice_api']==='1'){
+  header('Content-Type: application/json; charset=utf-8');
+  if($_SERVER['REQUEST_METHOD']==='GET'){
+    $tipo = $_GET['type'] ?? 'status';
+    if($tipo === 'status'){
+      $estado = $conn->query("SELECT fuente_audio, estado, ultimo_evento, ultima_habitacion, ultima_confianza, updated_at FROM voz_estado WHERE id=1 LIMIT 1")->fetch_assoc();
+      $evRes = $conn->query("SELECT id, fecha_hora, fuente_audio, transcripcion, venta_detectada, habitacion_detectada, confianza, accion_ejecutada, resultado, observaciones, accion_tipo FROM voz_eventos ORDER BY id DESC LIMIT 20");
+      $eventos=[];
+      while($r=$evRes->fetch_assoc()){
+        $eventos[] = $r;
+      }
+      echo json_encode(['ok'=>1,'estado'=>$estado,'fuentes'=>vozFuenteCatalogo(),'eventos'=>$eventos]);
+      exit;
+    }
+    if($tipo === 'events'){
+      $limit = max(1,min(100,intval($_GET['limit'] ?? 20)));
+      $evRes = $conn->query("SELECT id, fecha_hora, fuente_audio, transcripcion, venta_detectada, habitacion_detectada, confianza, accion_ejecutada, resultado, observaciones, accion_tipo FROM voz_eventos ORDER BY id DESC LIMIT $limit");
+      $eventos=[];
+      while($r=$evRes->fetch_assoc()){ $eventos[]=$r; }
+      echo json_encode(['ok'=>1,'eventos'=>$eventos]);
+      exit;
+    }
+  }
+
+  if($_SERVER['REQUEST_METHOD']==='POST'){
+    $raw = file_get_contents('php://input');
+    $payload = json_decode($raw, true);
+    if(!is_array($payload)){ $payload = $_POST; }
+    $action = $payload['voice_action'] ?? '';
+    $nowUTC = nowUTCStrFromArg();
+
+    if($action==='start_listening'){
+      $fuente = trim($payload['fuente_audio'] ?? 'mic-default');
+      $evento = 'Escucha iniciada';
+      $st = $conn->prepare("UPDATE voz_estado SET fuente_audio=?, estado='escuchando', ultimo_evento=?, updated_at=? WHERE id=1");
+      $st->bind_param('sss',$fuente,$evento,$nowUTC);
+      $st->execute();
+      $st->close();
+      echo json_encode(['ok'=>1,'estado'=>'escuchando']);
+      exit;
+    }
+
+    if($action==='stop_listening'){
+      $evento = 'Escucha detenida';
+      $st = $conn->prepare("UPDATE voz_estado SET estado='detenido', ultimo_evento=?, updated_at=? WHERE id=1");
+      $st->bind_param('ss',$evento,$nowUTC);
+      $st->execute();
+      $st->close();
+      echo json_encode(['ok'=>1,'estado'=>'detenido']);
+      exit;
+    }
+
+    if($action==='process_transcription'){
+      $fuente = trim($payload['fuente_audio'] ?? 'mic-default');
+      $texto = trim($payload['transcripcion'] ?? '');
+      if($texto===''){ echo json_encode(['ok'=>0,'error'=>'Transcripción vacía']); exit; }
+
+      $analisis = vozAnalizarTranscripcion($texto);
+      $ventaDetectada = $analisis['venta_detectada'] ? 1 : 0;
+      $habitacion = $analisis['habitacion'] ? intval($analisis['habitacion']) : null;
+      $conf = floatval($analisis['confianza']);
+      $confPct = (int)round($conf * 100);
+      $accionEjecutada = 0;
+      $resultado = 'sin_venta';
+      $obs = $analisis['motivo'];
+      if($ventaDetectada){
+        if($conf >= 0.78){
+          $venta = vozIntentarVentaHabitacion($conn,$habitacion,$SUPER_VIP,$VIP_LIST);
+          if($venta['ok']){
+            $accionEjecutada = 1;
+            $resultado = 'venta_ejecutada';
+          } else {
+            $resultado = 'venta_rechazada';
+          }
+          $obs .= ' | '.$venta['motivo'];
+        } else {
+          $resultado = 'sugerida_revision';
+          $obs .= ' | Confianza insuficiente para ejecutar automático';
+        }
+      }
+
+      $eventoData = [
+        'fecha_hora'=>$nowUTC,
+        'fuente_audio'=>$fuente,
+        'transcripcion'=>$texto,
+        'venta_detectada'=>$ventaDetectada,
+        'habitacion_detectada'=>$habitacion,
+        'confianza_pct'=>$confPct,
+        'accion_ejecutada'=>$accionEjecutada,
+        'resultado'=>$resultado,
+        'observaciones'=>$obs,
+        'accion_tipo'=>$accionEjecutada ? 'automatica' : 'sugerida'
+      ];
+      $eventId = vozRegistrarEvento($conn,$eventoData);
+
+      $ultimoEvento = $resultado === 'venta_ejecutada' ? 'Venta automática ejecutada' : ($resultado === 'sugerida_revision' ? 'Sugerencia pendiente de revisión' : 'Evento sin venta');
+      $up = $conn->prepare("UPDATE voz_estado SET fuente_audio=?, ultimo_evento=?, ultima_habitacion=?, ultima_confianza=?, updated_at=? WHERE id=1");
+      $up->bind_param('ssids',$fuente,$ultimoEvento,$habitacion,$conf,$nowUTC);
+      $up->execute();
+      $up->close();
+
+      echo json_encode(['ok'=>1,'event_id'=>$eventId,'analisis'=>$analisis,'resultado'=>$resultado,'accion_ejecutada'=>$accionEjecutada]);
+      exit;
+    }
+
+    if($action==='mark_sale'){
+      $habitacion = intval($payload['habitacion'] ?? 0);
+      if($habitacion < 1 || $habitacion > 40){ echo json_encode(['ok'=>0,'error'=>'Habitación inválida']); exit; }
+      $venta = vozIntentarVentaHabitacion($conn,$habitacion,$SUPER_VIP,$VIP_LIST);
+      echo json_encode(['ok'=>$venta['ok'] ? 1 : 0,'motivo'=>$venta['motivo']]);
+      exit;
+    }
+  }
+
+  echo json_encode(['ok'=>0,'error'=>'Endpoint de voz no reconocido']);
+  exit;
 }
 /*==================== AJAX de tarjetas =================*/
 if(isset($_GET['ajax']) && $_GET['ajax']=='1'){
@@ -2001,6 +2260,7 @@ html, body { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grays
         <button class="<?php echo ($view==='reportes-empleadas'?'active':''); ?>" onclick="location.href='?view=reportes-empleadas'">Reporte empleadas</button>
         <button onclick="window.open('https://lamoradatandil.com/inventario.php', '_blank')">Inventario</button>
         <button class="<?php echo ($view==='valores'?'active':''); ?>" onclick="location.href='?view=valores'">Editar valores</button>
+        <button class="<?php echo ($view==='voz'?'active':''); ?>" onclick="location.href='?view=voz'">Voz</button>
       <div class="clock" id="arg-clock">--:--:--</div>
       <span id="turno-label" style="font-weight:700;margin-left:8px;color:#0B5FFF">Turnos de -- h</span>
     </div>
@@ -2012,6 +2272,7 @@ html, body { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grays
   <button onclick="location.href='?view=valores'">Editar valores</button>
   <button onclick="location.href='?view=reportes-empleadas'">Reporte empleadas</button>
   <button onclick="location.href='?view=reportes'">Reportes</button>
+  <button onclick="location.href='?view=voz'">Voz</button>
   <button onclick="window.open('https://lamoradatandil.com/inventario.php','_blank')">Inventario</button>
 </div>
 
@@ -2690,6 +2951,127 @@ $promedio_turno = ($cantidad_turnos > 0)
 <?php endif; ?>
 </main>
 
+<?php endif; ?>
+<?php if($view==='voz'): ?>
+<main class="container">
+  <div class="card" style="width:100%;max-width:980px;">
+    <h2 style="margin-top:0;">🎙️ Voz — Venta automática de habitaciones</h2>
+    <p style="margin-top:0;color:#6b7280;">Módulo desacoplado para captura/transcripción/análisis y ejecución de venta automática con validación por confianza.</p>
+
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;align-items:end;">
+      <label>Fuente de audio
+        <select id="voz-fuente" style="width:100%;padding:8px;border:1px solid #d1d5db;border-radius:8px;"></select>
+      </label>
+      <button id="voz-start" style="background:#0B5FFF;color:#fff;border:none;padding:10px 12px;border-radius:8px;cursor:pointer;">Iniciar escucha</button>
+      <button id="voz-stop" style="background:#111827;color:#fff;border:none;padding:10px 12px;border-radius:8px;cursor:pointer;">Detener escucha</button>
+    </div>
+
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px;margin-top:14px;">
+      <div style="background:#f9fafb;border:1px solid #e5e7eb;padding:10px;border-radius:8px;"><b>Fuente seleccionada:</b><br><span id="voz-state-fuente">-</span></div>
+      <div style="background:#f9fafb;border:1px solid #e5e7eb;padding:10px;border-radius:8px;"><b>Estado:</b><br><span id="voz-state-estado">detenido</span></div>
+      <div style="background:#f9fafb;border:1px solid #e5e7eb;padding:10px;border-radius:8px;"><b>Último evento:</b><br><span id="voz-state-evento">Sin eventos</span></div>
+      <div style="background:#f9fafb;border:1px solid #e5e7eb;padding:10px;border-radius:8px;"><b>Última habitación:</b><br><span id="voz-state-hab">-</span></div>
+      <div style="background:#f9fafb;border:1px solid #e5e7eb;padding:10px;border-radius:8px;"><b>Última confianza:</b><br><span id="voz-state-conf">-</span></div>
+    </div>
+
+    <div style="margin-top:14px;border:1px solid #e5e7eb;border-radius:8px;padding:10px;background:#fff;">
+      <b>Procesamiento de transcripción (stub integrable)</b>
+      <p style="margin:6px 0;color:#6b7280;">Este formulario permite inyectar resultados de ASR/IA real sin cambiar la arquitectura.</p>
+      <textarea id="voz-transcripcion" rows="3" placeholder="Ej: Pasen a la 7" style="width:100%;padding:10px;border:1px solid #d1d5db;border-radius:8px;"></textarea>
+      <button id="voz-procesar" style="margin-top:8px;background:#16a34a;color:#fff;border:none;padding:10px 12px;border-radius:8px;cursor:pointer;">Procesar transcripción</button>
+    </div>
+
+    <h3 style="margin-bottom:8px;">Eventos recientes</h3>
+    <div style="overflow:auto;border:1px solid #e5e7eb;border-radius:8px;">
+      <table style="width:100%;border-collapse:collapse;font-size:13px;">
+        <thead><tr style="background:#f3f4f6;"><th style="padding:8px;border-bottom:1px solid #e5e7eb;">Fecha</th><th style="padding:8px;border-bottom:1px solid #e5e7eb;">Texto</th><th style="padding:8px;border-bottom:1px solid #e5e7eb;">Hab</th><th style="padding:8px;border-bottom:1px solid #e5e7eb;">Resultado</th><th style="padding:8px;border-bottom:1px solid #e5e7eb;">Conf.</th><th style="padding:8px;border-bottom:1px solid #e5e7eb;">Acción</th></tr></thead>
+        <tbody id="voz-eventos-body"><tr><td colspan="6" style="padding:10px;text-align:center;color:#6b7280;">Sin eventos</td></tr></tbody>
+      </table>
+    </div>
+
+    <a href="?view=panel" style="display:block;margin-top:10px;color:#0B5FFF;text-decoration:none;">⬅ Volver al panel</a>
+  </div>
+</main>
+<script>
+(function(){
+  const sel = document.getElementById('voz-fuente');
+  const stateFuente = document.getElementById('voz-state-fuente');
+  const stateEstado = document.getElementById('voz-state-estado');
+  const stateEvento = document.getElementById('voz-state-evento');
+  const stateHab = document.getElementById('voz-state-hab');
+  const stateConf = document.getElementById('voz-state-conf');
+  const tbody = document.getElementById('voz-eventos-body');
+
+  async function voiceCall(payload){
+    const res = await fetch('?voice_api=1', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(payload)
+    });
+    return res.json();
+  }
+
+  function renderEvents(items){
+    if(!items || !items.length){
+      tbody.innerHTML = '<tr><td colspan="6" style="padding:10px;text-align:center;color:#6b7280;">Sin eventos</td></tr>';
+      return;
+    }
+    tbody.innerHTML = items.map(ev => `
+      <tr>
+        <td style="padding:8px;border-bottom:1px solid #f3f4f6;">${ev.fecha_hora || ''}</td>
+        <td style="padding:8px;border-bottom:1px solid #f3f4f6;">${(ev.transcripcion||'').replace(/</g,'&lt;')}</td>
+        <td style="padding:8px;border-bottom:1px solid #f3f4f6;">${ev.habitacion_detectada || '-'}</td>
+        <td style="padding:8px;border-bottom:1px solid #f3f4f6;">${ev.resultado || '-'}</td>
+        <td style="padding:8px;border-bottom:1px solid #f3f4f6;">${ev.confianza ? ev.confianza+'%' : '-'}</td>
+        <td style="padding:8px;border-bottom:1px solid #f3f4f6;">${ev.accion_ejecutada==1?'Automática':'Sugerida'}</td>
+      </tr>`).join('');
+  }
+
+  async function refresh(){
+    const res = await fetch('?voice_api=1&type=status');
+    const data = await res.json();
+    if(!data.ok){ return; }
+
+    sel.innerHTML = '';
+    (data.fuentes || []).forEach(f => {
+      const op = document.createElement('option');
+      op.value = f.id;
+      op.textContent = f.label;
+      sel.appendChild(op);
+    });
+
+    if(data.estado && data.estado.fuente_audio){ sel.value = data.estado.fuente_audio; }
+    stateFuente.textContent = data.estado?.fuente_audio || '-';
+    stateEstado.textContent = data.estado?.estado || 'detenido';
+    stateEvento.textContent = data.estado?.ultimo_evento || 'Sin eventos';
+    stateHab.textContent = data.estado?.ultima_habitacion || '-';
+    stateConf.textContent = data.estado?.ultima_confianza ? Math.round(data.estado.ultima_confianza*100)+'%' : '-';
+
+    renderEvents(data.eventos || []);
+  }
+
+  document.getElementById('voz-start').addEventListener('click', async ()=>{
+    await voiceCall({voice_action:'start_listening', fuente_audio: sel.value});
+    await refresh();
+  });
+
+  document.getElementById('voz-stop').addEventListener('click', async ()=>{
+    await voiceCall({voice_action:'stop_listening'});
+    await refresh();
+  });
+
+  document.getElementById('voz-procesar').addEventListener('click', async ()=>{
+    const txt = document.getElementById('voz-transcripcion').value.trim();
+    if(!txt){ alert('Ingresá una transcripción'); return; }
+    await voiceCall({voice_action:'process_transcription', fuente_audio: sel.value, transcripcion: txt});
+    document.getElementById('voz-transcripcion').value = '';
+    await refresh();
+  });
+
+  refresh();
+  setInterval(refresh, 5000);
+})();
+</script>
 <?php endif; ?>
 
 <?php if($view==='panel'): ?>
