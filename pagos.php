@@ -24,6 +24,15 @@ function db(){
     $conn = new mysqli($servername, $username, $password, $dbname);
     if ($conn->connect_error) { http_response_code(500); die("DB error"); }
     $conn->set_charset('utf8mb4');
+    $conn->query("CREATE TABLE IF NOT EXISTS feriados_config (
+      id TINYINT PRIMARY KEY,
+      activo TINYINT(1) NOT NULL DEFAULT 0,
+      inicio_utc DATETIME NULL,
+      fin_utc DATETIME NULL,
+      creado_at DATETIME NULL,
+      actualizado_at DATETIME NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
+    $conn->query("INSERT IGNORE INTO feriados_config (id, activo) VALUES (1,0)");
     return $conn;
 }
 
@@ -63,7 +72,22 @@ function isNocheFindeNow(int $dow, int $hour){
   return false;
 }
 function isNightAllowedNow(){ list($dow,$hour)=argNowInfo(); return ($hour>=21 || $hour<10); }
-function turnoBlockHoursForToday(){ list($dow,$hour)=argNowInfo(); return isTwoHourWindowNow($dow,$hour) ? 2 : 3; }
+function feriadoActivoAhora($conn){
+  $res = $conn->query("SELECT activo, inicio_utc, fin_utc FROM feriados_config WHERE id=1 LIMIT 1");
+  $cfg = $res ? $res->fetch_assoc() : null;
+  if((int)($cfg['activo'] ?? 0)!==1){ return false; }
+  $inicio = $cfg['inicio_utc'] ?? null;
+  $fin = $cfg['fin_utc'] ?? null;
+  if(!$inicio || !$fin){ return false; }
+  $now = nowUTCStrFromArg();
+  return ($now >= $inicio && $now <= $fin);
+}
+function feriadoConfigActual($conn){
+  $res = $conn->query("SELECT activo, inicio_utc, fin_utc FROM feriados_config WHERE id=1 LIMIT 1");
+  return $res ? ($res->fetch_assoc() ?: []) : [];
+}
+function turnoBlockHoursForToday($conn){ if(feriadoActivoAhora($conn)) return 2; list($dow,$hour)=argNowInfo(); return isTwoHourWindowNow($dow,$hour) ? 2 : 3; }
+function nocheFindeActivaAhora($conn){ if(feriadoActivoAhora($conn)) return true; list($dow,$hour)=argNowInfo(); return isNocheFindeNow($dow,$hour); }
 
 function tipoDeHabitacion($id, $SUPER_VIP, $VIP_LIST){
   if(in_array($id,$SUPER_VIP)) return 'Super VIP';
@@ -673,7 +697,7 @@ if($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion'])){
     $categoria = $_POST['categoria'] ?? 'comun';
     $modalidad = $_POST['modalidad'] ?? 'turno';
     $bloques = max(1, intval($_POST['bloques'] ?? 1));
-    $duracion = turnoBlockHoursForToday()===2 ? 'turno-2h' : 'turno-3h';
+    $duracion = turnoBlockHoursForToday($conn)===2 ? 'turno-2h' : 'turno-3h';
     $acepta   = !empty($_POST['acepta']);
 
     if(!$acepta){ echo json_encode(['ok'=>0,'error'=>'Debés confirmar que entendés el inicio del reloj.']); exit; }
@@ -682,10 +706,10 @@ if($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion'])){
     if($modalidad==='noche'){
       if(!isNightAllowedNow()){ echo json_encode(['ok'=>0,'error'=>'El turno noche solo puede reservarse entre las 21:00 y las 10:00.']); exit; }
       list($dow,$hour) = argNowInfo();
-      $duracion = isNocheFindeNow($dow,$hour) ? 'noche-finde' : 'noche';
+      $duracion = nocheFindeActivaAhora($conn) ? 'noche-finde' : 'noche';
       $bloques = 1;
     }else{
-      $duracion = turnoBlockHoursForToday()===2 ? 'turno-2h' : 'turno-3h';
+      $duracion = turnoBlockHoursForToday($conn)===2 ? 'turno-2h' : 'turno-3h';
     }
 
     $habitacion = habitacionLibrePorCategoria($conn,$categoria,$SUPER_VIP,$VIP_LIST,null);
@@ -736,7 +760,7 @@ if($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion'])){
     $bloques = max(1, intval($_POST['bloques'] ?? 1));
     if($habitacion<=0 || $habitacion>40){ echo json_encode(['ok'=>0,'error'=>'Habitación inválida']); exit; }
     if(!habitacionOcupada($conn,$habitacion)){ echo json_encode(['ok'=>0,'error'=>'Solo disponible para habitaciones ocupadas.']); exit; }
-    $turnoTag = turnoBlockHoursForToday()===2 ? 'turno-2h' : 'turno-3h';
+    $turnoTag = turnoBlockHoursForToday($conn)===2 ? 'turno-2h' : 'turno-3h';
     $categoria = in_array($habitacion,$SUPER_VIP) ? 'supervip' : (in_array($habitacion,$VIP_LIST) ? 'vip' : 'comun');
     $tipoHab = categoriaLabel($categoria);
     $precioUnit = precioVigenteInt($conn,$tipoHab,$turnoTag);
@@ -787,7 +811,12 @@ if($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion'])){
   exit;
 }
 
-$precios = preciosMap(db());
+$conn = db();
+$precios = preciosMap($conn);
+$feriadoCfg = feriadoConfigActual($conn);
+$feriadoActivo = feriadoActivoAhora($conn);
+$feriadoInicioArg = !empty($feriadoCfg['inicio_utc']) ? (function($utc){ $d=new DateTime($utc,new DateTimeZone('UTC')); $d->setTimezone(new DateTimeZone('America/Argentina/Buenos_Aires')); return $d; })($feriadoCfg['inicio_utc']) : null;
+$feriadoFinArg = !empty($feriadoCfg['fin_utc']) ? (function($utc){ $d=new DateTime($utc,new DateTimeZone('UTC')); $d->setTimezone(new DateTimeZone('America/Argentina/Buenos_Aires')); return $d; })($feriadoCfg['fin_utc']) : null;
 $status = $_GET['status'] ?? ($_GET['collection_status'] ?? null);
 $collectionStatus = $_GET['collection_status'] ?? null;
 $tokenRet = $_GET['token'] ?? null;
@@ -878,6 +907,11 @@ if($tokenRet){
     <a class="map-link map-link-cta" href="<?= htmlspecialchars($HOTEL_MAP_LINK) ?>" target="_blank" rel="noopener">📍 Ver mapa</a>
   </header>
   <main>
+      <?php if($feriadoActivo && $feriadoFinArg): ?>
+      <div class="card" style="border-color:#f59e0b;background:rgba(245,158,11,.12);">
+        <strong>🎌 Feriado activo:</strong> ahora se aplica turno de 2h y precio de noche finde hasta <?= $feriadoFinArg->format('d/m H:i') ?>.
+      </div>
+    <?php endif; ?>
     <?php if($feedback): ?>
       <div class="card" id="feedback">
         <?php if($feedback['ok']): ?>
@@ -941,7 +975,12 @@ if($tokenRet){
         </div>
       </div>
       <div class="divider"></div>
-      <div class="alert">Precios vigentes se calculan al momento del pago. El turno noche solo está disponible de 21:00 a 10:00.</div>
+      <div class="alert">
+        Precios vigentes se calculan al momento del pago. El turno noche solo está disponible de 21:00 a 10:00.
+        <?php if($feriadoActivo): ?>
+          <br><strong>Hoy está activo modo feriado:</strong> turnos de 2h + noche finde.
+        <?php endif; ?>
+      </div>
       <div class="confirm-section">
         <div class="confirm-total">
           <div id="res-total" class="pill">Total estimado: $ --</div>
@@ -982,7 +1021,7 @@ if($tokenRet){
           <input type="number" id="extra-bloques" value="1" min="1" step="1">
         </div>
       </div>
-      <div class="alert">No genera turno nocturno nuevo, pero sí suma horas sobre un turno noche existente. El largo del turno sigue la lógica de 2h/3h del día.</div>
+      <div class="alert">No genera turno nocturno nuevo, pero sí suma horas sobre un turno noche existente. El largo del turno sigue la lógica de 2h/3h del día<?= $feriadoActivo ? ' (modo feriado activo: 2h).' : '.' ?></div>
       <div id="extra-total" class="pill">Total estimado: $ --</div>
       <button class="btn" id="extra-btn">Agregar turno</button>
     </section>
@@ -1003,18 +1042,22 @@ if($tokenRet){
   </main>
 <script>
 const PRECIOS = <?= json_encode($precios, JSON_UNESCAPED_UNICODE) ?>;
-const BLOCK_HOURS = <?= turnoBlockHoursForToday() ?>;
+const BLOCK_HOURS = <?= turnoBlockHoursForToday($conn) ?>;
+const FERIADO_ACTIVO = <?= $feriadoActivo ? 'true' : 'false' ?>;
 const SUCCESS_FIN_TS = <?= isset($feedback['fin_ts']) && $feedback['fin_ts'] ? (int)$feedback['fin_ts'] : 'null' ?>;
 const AUTO_TURNO_TAG = BLOCK_HOURS===2 ? 'turno-2h' : 'turno-3h';
 const AUTO_TURNO_LABEL = BLOCK_HOURS===2 ? 'Turno 2 h' : 'Turno 3 h';
 
-document.getElementById('res-duracion-auto').textContent = `Hoy se asigna ${AUTO_TURNO_LABEL} automáticamente`;
+document.getElementById('res-duracion-auto').textContent = FERIADO_ACTIVO
+  ? `Hoy se asigna ${AUTO_TURNO_LABEL} automáticamente (feriado)`
+  : `Hoy se asigna ${AUTO_TURNO_LABEL} automáticamente`;
 
 function formatoPrecio(tipo, turno){
   const val = (PRECIOS?.[tipo]?.[turno]) ?? 0;
   return parseInt(val,10) || 0;
 }
 function esNocheFindeAhora(){
+    if(FERIADO_ACTIVO) return true;
   const now = new Date();
   const dow = now.getDay(); // 0=Dom..6=Sab
   const hour = now.getHours();

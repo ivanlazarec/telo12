@@ -215,6 +215,18 @@ CREATE TABLE IF NOT EXISTS precios_habitaciones (
 ");
 
 $conn->query("
+CREATE TABLE IF NOT EXISTS feriados_config (
+  id TINYINT PRIMARY KEY,
+  activo TINYINT(1) NOT NULL DEFAULT 0,
+  inicio_utc DATETIME NULL,
+  fin_utc DATETIME NULL,
+  creado_at DATETIME NULL,
+  actualizado_at DATETIME NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+");
+$conn->query("INSERT IGNORE INTO feriados_config (id, activo) VALUES (1,0)");
+
+$conn->query("
 INSERT IGNORE INTO precios_habitaciones (tipo,turno,precio) VALUES
 ('Común','turno-2h',0),('Común','turno-3h',0),('Común','noche',0),('Común','noche-finde',0),
 ('VIP','turno-2h',0),('VIP','turno-3h',0),('VIP','noche',0),('VIP','noche-finde',0),
@@ -304,6 +316,27 @@ function argDateFromTs($ts){
   $dt->setTimezone(new DateTimeZone('America/Argentina/Buenos_Aires'));
   return $dt->format('Y-m-d');
 }
+function argLocalToUTCStr($localDT){
+  $localDT = trim((string)$localDT);
+  if($localDT===''){ return null; }
+  $dt = DateTime::createFromFormat('Y-m-d\TH:i', $localDT, new DateTimeZone('America/Argentina/Buenos_Aires'));
+  if(!$dt){ return null; }
+  $dt->setTimezone(new DateTimeZone('UTC'));
+  return $dt->format('Y-m-d H:i:s');
+}
+function feriadoConfigActual($conn){
+  $r = $conn->query("SELECT activo, inicio_utc, fin_utc, actualizado_at FROM feriados_config WHERE id=1 LIMIT 1");
+  return $r ? ($r->fetch_assoc() ?: []) : [];
+}
+function feriadoActivoAhora($conn){
+  $cfg = feriadoConfigActual($conn);
+  if((int)($cfg['activo'] ?? 0)!==1){ return false; }
+  $inicio = $cfg['inicio_utc'] ?? null;
+  $fin = $cfg['fin_utc'] ?? null;
+  if(!$inicio || !$fin){ return false; }
+  $ahora = nowUTCStrFromArg();
+  return ($ahora >= $inicio && $ahora <= $fin);
+}
 function turnoEndArgTs($turno,$startArgTs,$bloques=1){
   $bloques = max(1, (int)$bloques);
   if($turno==='turno-2h'){ return $startArgTs + (2 * 3600 * $bloques); }
@@ -362,7 +395,16 @@ function nightEndTsFromStartArg($startTs){
 function isNightAllowedNow(){ list($dow,$hour)=argNowInfo(); return ($hour>=21 || $hour<10); }
 
 // Bloques de turno: Vie 8:00 → Dom 23:59 = 2h, resto = 3h
-function turnoBlockHoursForToday(){ list($dow,$hour)=argNowInfo(); return isTwoHourWindowNow($dow,$hour) ? 2 : 3; }
+function turnoBlockHoursForToday($conn=null){
+  if($conn && feriadoActivoAhora($conn)){ return 2; }
+  list($dow,$hour)=argNowInfo();
+  return isTwoHourWindowNow($dow,$hour) ? 2 : 3;
+}
+function nocheFindeActivaAhora($conn=null){
+  if($conn && feriadoActivoAhora($conn)){ return true; }
+  list($dow,$hour)=argNowInfo();
+  return isNocheFindeNow($dow,$hour);
+}
 
 // Precio vigente (redondeado, entero)
 function precioVigenteInt($conn,$tipo,$turno){
@@ -468,7 +510,7 @@ function vozIntentarVentaHabitacion($conn,$habitacion,$SUPER_VIP,$VIP_LIST,$tipo
   if($tipoPedido && $tipoPedido !== $tipo){
     return ['ok'=>false,'motivo'=>'Tipo solicitado '.$tipoPedido.' no coincide con la habitación '.$habitacion.' ('.$tipo.')'];
   }
-  $blockHours = turnoBlockHoursForToday();
+  $blockHours = turnoBlockHoursForToday($conn);
   $turno = $blockHours===2 ? 'turno-2h' : 'turno-3h';
   $inicio = nowUTCStrFromArg();
   $fecha = argDateToday();
@@ -1408,7 +1450,7 @@ if($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion'])){
   }
  if($accion==='ocupar_turno'){ // agregar bloque (acumulable)
     $ids = array_filter(array_map('intval', explode(',', $_POST['ids'] ?? '')));
-    $blockHours = turnoBlockHoursForToday();
+    $blockHours = turnoBlockHoursForToday($conn);
     $turnoTag = $blockHours===2 ? 'turno-2h' : 'turno-3h';
     $nowArgTs = nowArgDT()->getTimestamp();
     $startUTC = gmdate('Y-m-d H:i:s', $nowArgTs);
@@ -1510,7 +1552,7 @@ if($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion'])){
 
       // tipo y turno (noche finde: franjas de viernes y sábado)
       list($dow,$hour)=argNowInfo();
-      $turno = isNocheFindeNow($dow,$hour) ? 'noche-finde' : 'noche';
+      $turno = nocheFindeActivaAhora($conn) ? 'noche-finde' : 'noche';
 
       // precio vigente congelado
       $tipoHab = tipoDeHabitacion($id,$SUPER_VIP,$VIP_LIST);
@@ -1546,7 +1588,7 @@ if($accion==='reactivar_extra'){
 
     
 
-    $blockHours = turnoBlockHoursForToday();
+    $blockHours = turnoBlockHoursForToday($conn);
     $turnoTag = $blockHours===2 ? 'turno-2h' : 'turno-3h';
     $startUTC = nowUTCStrFromArg();
     $fecha    = argDateToday();
@@ -1653,6 +1695,10 @@ $view = $_GET['view'] ?? 'panel';
 if ($view !== 'reportes') {
     unset($_SESSION['reportes_ok']);
 }
+$feriadoCfgGlobal = feriadoConfigActual($conn);
+$feriadoActivoGlobal = feriadoActivoAhora($conn);
+$feriadoInicioArgGlobal = !empty($feriadoCfgGlobal['inicio_utc']) ? toArgDT($feriadoCfgGlobal['inicio_utc']) : null;
+$feriadoFinArgGlobal = !empty($feriadoCfgGlobal['fin_utc']) ? toArgDT($feriadoCfgGlobal['fin_utc']) : null;
 /*=================== Estados iniciales =================*/
 $states = [];
 $rs = $conn->query("SELECT id, estado, tipo_turno, hora_inicio, codigo_reserva FROM habitaciones ORDER BY id ASC");
@@ -2599,6 +2645,31 @@ if($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['precios'])){
     }
     echo '<div style="background:#D1FAE5;color:#065F46;padding:10px;margin:10px;border-radius:6px;">💾 Valores actualizados correctamente.</div>';
 }
+if($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion_feriado'])){
+    if($_POST['accion_feriado']==='activar_feriado'){
+      $inicioUTC = argLocalToUTCStr($_POST['feriado_inicio'] ?? '');
+      $finUTC = argLocalToUTCStr($_POST['feriado_fin'] ?? '');
+      if(!$inicioUTC || !$finUTC){
+        echo '<div style="background:#FEE2E2;color:#B91C1C;padding:10px;margin:10px;border-radius:6px;">❌ Cargá inicio y fin del feriado.</div>';
+      }elseif($finUTC <= $inicioUTC){
+        echo '<div style="background:#FEE2E2;color:#B91C1C;padding:10px;margin:10px;border-radius:6px;">❌ El fin del feriado debe ser posterior al inicio.</div>';
+      }else{
+        $nowUTC = nowUTCStrFromArg();
+        $st = $conn->prepare("UPDATE feriados_config SET activo=1, inicio_utc=?, fin_utc=?, actualizado_at=?, creado_at=COALESCE(creado_at,?) WHERE id=1");
+        $st->bind_param('ssss',$inicioUTC,$finUTC,$nowUTC,$nowUTC);
+        $st->execute(); $st->close();
+        echo '<div style="background:#D1FAE5;color:#065F46;padding:10px;margin:10px;border-radius:6px;">🎉 Feriado activado correctamente.</div>';
+      }
+    }elseif($_POST['accion_feriado']==='cancelar_feriado'){
+      $nowUTC = nowUTCStrFromArg();
+      $conn->query("UPDATE feriados_config SET activo=0, actualizado_at='".$conn->real_escape_string($nowUTC)."' WHERE id=1");
+      echo '<div style="background:#FEF3C7;color:#92400E;padding:10px;margin:10px;border-radius:6px;">⛔ Feriado cancelado.</div>';
+    }
+    $feriadoCfgGlobal = feriadoConfigActual($conn);
+    $feriadoActivoGlobal = feriadoActivoAhora($conn);
+    $feriadoInicioArgGlobal = !empty($feriadoCfgGlobal['inicio_utc']) ? toArgDT($feriadoCfgGlobal['inicio_utc']) : null;
+    $feriadoFinArgGlobal = !empty($feriadoCfgGlobal['fin_utc']) ? toArgDT($feriadoCfgGlobal['fin_utc']) : null;
+}
 $precios = [];
 $res = $conn->query("SELECT * FROM precios_habitaciones ORDER BY FIELD(tipo,'Común','VIP','Super VIP'), turno");
 while($r=$res->fetch_assoc()){ $precios[$r['tipo']][$r['turno']] = $r['precio']; }
@@ -2606,6 +2677,17 @@ while($r=$res->fetch_assoc()){ $precios[$r['tipo']][$r['turno']] = $r['precio'];
 
 <div class="card" style="max-width:600px">
   <h2 style="margin-top:0">🛏 Editar valores</h2>
+  <div style="padding:10px;border:1px solid #e5e7eb;border-radius:10px;background:#f8fafc;margin-bottom:12px;">
+    <strong>Estado de feriado:</strong>
+    <?php if((int)($feriadoCfgGlobal['activo'] ?? 0)===1 && $feriadoInicioArgGlobal && $feriadoFinArgGlobal): ?>
+      <?= $feriadoActivoGlobal ? '🟢 Activo ahora' : '🟡 Programado' ?>
+      <div style="font-size:13px;color:#475569;margin-top:4px;">
+        Desde <?= $feriadoInicioArgGlobal->format('d/m/Y H:i') ?> hasta <?= $feriadoFinArgGlobal->format('d/m/Y H:i') ?> (hora Argentina).
+      </div>
+    <?php else: ?>
+      <span style="color:#64748b;">Sin feriado activo.</span>
+    <?php endif; ?>
+  </div>
   <form method="post">
     <?php foreach(['Común','VIP','Super VIP'] as $tipo): ?>
       <h3 style="margin-top:20px"><?= $tipo ?></h3>
@@ -2618,6 +2700,25 @@ while($r=$res->fetch_assoc()){ $precios[$r['tipo']][$r['turno']] = $r['precio'];
     <?php endforeach; ?>
     <br>
     <button type="submit" style="background:#0B5FFF;color:#fff;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;">Guardar cambios</button>
+  </form>
+  <hr style="margin:18px 0;border:none;border-top:1px solid #e2e8f0;">
+  <h3 style="margin-top:0">🎌 Feriados</h3>
+  <p style="margin-top:0;color:#475569;">Dentro de este rango el sistema usa Turno 2h y Noche finde en panel, relojes y pagos online.</p>
+  <form method="post" style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+    <input type="hidden" name="accion_feriado" value="activar_feriado">
+    <label>Desde (fecha y hora)
+      <input type="datetime-local" name="feriado_inicio" required>
+    </label>
+    <label>Hasta (fecha y hora)
+      <input type="datetime-local" name="feriado_fin" required>
+    </label>
+    <div style="grid-column:1 / -1;">
+      <button type="submit" style="background:#0B5FFF;color:#fff;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;">Activar feriado</button>
+    </div>
+  </form>
+  <form method="post" style="margin-top:10px;">
+    <input type="hidden" name="accion_feriado" value="cancelar_feriado">
+    <button type="submit" style="background:#dc2626;color:#fff;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;">Cancelar feriado</button>
   </form>
   <a href="?view=panel" style="display:block;margin-top:10px;color:#0B5FFF;text-decoration:none;">⬅ Volver al panel</a>
 </div>
@@ -3280,6 +3381,12 @@ btnCapturar.addEventListener('click', async ()=>{
 
 <?php if($view==='panel'): ?>
 <main class="container" id="panel">
+    <?php if($feriadoActivoGlobal && $feriadoInicioArgGlobal && $feriadoFinArgGlobal): ?>
+    <div style="margin-bottom:10px;padding:10px;border-radius:10px;background:#fef3c7;color:#92400e;border:1px solid #f59e0b;">
+      🎌 <strong>Feriado activo:</strong> turnos de 2h + valor de noche finde habilitados
+      hasta <?= $feriadoFinArgGlobal->format('d/m H:i') ?>.
+    </div>
+  <?php endif; ?>
   <div class="panel-grid">
     <div class="section-label section-left">HOTEL VIEJO</div>
     <div class="section-label section-right">HOTEL NUEVO</div>
@@ -3716,6 +3823,7 @@ document.addEventListener("click", async e => {
 
 <script>
 // ===== Reloj ARG + etiqueta de turnos
+const FERIADO_ACTIVO = <?= $feriadoActivoGlobal ? 'true' : 'false' ?>;
 (function(){
   const el = document.getElementById('arg-clock');
   function tick(){
@@ -3736,6 +3844,7 @@ function nowArgParts(){
   return { dow:dowMap[map.weekday], hour:parseInt(map.hour,10) };
 }
 function turnoBlockHoursJS(){
+    if(FERIADO_ACTIVO) return 2;
   const n=nowArgParts();
   return ((n.dow===5 && n.hour>=8) || n.dow===6 || n.dow===0) ? 2 : 3;
 } // Vie 8:00 → Dom 23:59 = 2h
@@ -3744,7 +3853,7 @@ function isNightAllowedNowJS(){ const n=nowArgParts(); return (n.hour>=21 || n.h
 function updateTurnoLabel(){
   const el = document.getElementById('turno-label');
   if(!el) return;
-  el.textContent = `Turnos de ${turnoBlockHoursJS()} h`;
+  el.textContent = FERIADO_ACTIVO ? 'Turnos de 2 h (feriado)' : `Turnos de ${turnoBlockHoursJS()} h`;
 }
 setInterval(updateTurnoLabel, 60000); updateTurnoLabel();
 
